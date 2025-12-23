@@ -242,6 +242,8 @@ def train(
                         "train/perplexity": 2.71828**train_loss,
                         "lr": current_lrs[0],
                         "iter_dt": dt,
+                        "consumed_tokens": curr_iter * ws * cfg.acc_steps * cfg.batch_size * cfg.sequence_length,
+                        "tok_gpu_sec": cfg.sequence_length * cfg.batch_size * cfg.acc_steps / dt,
                         "grad_norm": grad_norm,
                     }
                 )
@@ -298,6 +300,7 @@ def eval_and_log(
                 "final-val/loss": val_loss,
                 "final-val/perplexity": val_perplexity,
                 "final-val/acc": val_acc,
+                "consumed_tokens": curr_iter * distributed_backend.get_world_size() * cfg.acc_steps * cfg.batch_size * cfg.sequence_length,
             }
         else:
             logs = {
@@ -305,6 +308,7 @@ def eval_and_log(
                 "val/loss": val_loss,
                 "val/perplexity": val_perplexity,
                 "val/acc": val_acc,
+                "consumed_tokens": curr_iter * distributed_backend.get_world_size() * cfg.acc_steps * cfg.batch_size * cfg.sequence_length,
             }
 
         wandb.log(logs)
