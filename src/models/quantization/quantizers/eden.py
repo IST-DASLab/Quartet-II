@@ -28,8 +28,9 @@ def rtn_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 
 def sr_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-    if (x > 6.0).any():
-        raise ValueError(f"Can't SR overflowing tensor: {x.max().item()} > 6")
+    if (x.abs() > 6.001).any():
+        raise ValueError(f"Can't SR overflowing tensor: {x.abs().max().item()} > 6")
+    x = torch.clamp(x, -6.0, 6.0)
     
     inds = torch.bucketize(x, grid)
 
@@ -55,8 +56,12 @@ def sr_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 
 def sr_e4m3(x: torch.Tensor) -> torch.Tensor:
-    if (x > 448.0).any():
+    if (x > 448.001).any():
         raise ValueError(f"Can't SR overflowing tensor: {x.max().item()} > 448")
+    x = torch.clamp(x, -448.0, 448.0)
+    
+    if x.isnan().any():
+        raise ValueError("x has NaNs")
     
     q = x.to(torch.float8_e4m3fn)
     nextdq = (q.view(torch.uint8) + 1).view(torch.float8_e4m3fn).float()
@@ -85,13 +90,17 @@ def sr_e4m3(x: torch.Tensor) -> torch.Tensor:
     
     
 def sr_e8m0(x: torch.Tensor) -> torch.Tensor:
+    if x.isnan().any():
+        raise ValueError("x has NaNs")
+    
     low = 2 ** (torch.floor(torch.log2(x)))
     high = low * 2
     
+    prob = (x - low) / (high - low)
+    prob = torch.clamp(prob, 0, 1)
+    
     return torch.where(
-        torch.bernoulli(
-            (x - low) / (high - low)
-        ) == 1.0,
+        torch.bernoulli(prob) == 1.0,
         high,
         low,
     )
@@ -129,12 +138,12 @@ class EdenSRQuantizer(BaseQuantizer):
         
     def round_scales(self, scales: torch.Tensor) -> (torch.Tensor, torch.Tensor):
         if self.scale_dtype == "fp32":
-            return scales / 6.0, torch.tensor([1.0], device=scales.device, dtype=scales.dtype)
+            return scales, torch.tensor([1.0 / 6.0], device=scales.device, dtype=scales.dtype)
         elif self.scale_dtype == "e4m3":
             global_scale = scales.max() / 256.0
-            scales = scales / global_scale / 6.0
+            scales = scales / global_scale
             scales = scales.to(torch.float8_e4m3fn).float()
-            return scales, global_scale * (16 / 15)
+            return scales, global_scale / 6.0 * (17 / 16)
         elif self.scale_dtype == "e8m0":
             scales = 2 ** (torch.floor(torch.log2(scales)))
             return scales, torch.tensor([1 / 3.0], device=scales.device, dtype=scales.dtype)
