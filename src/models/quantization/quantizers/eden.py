@@ -104,13 +104,16 @@ class EdenSRQuantizer(BaseQuantizer):
         device="cuda",
     )
     
-    def __init__(self, hadamard_dim=32, scale_dtype="fp32", unbiased="eden", rerotate=None):
+    def __init__(self, hadamard_dim=32, group_dim=None, scale_dtype="fp32", unbiased="eden", rerotate=None):
         super().__init__(4)
         
         self.hadamard_dim = hadamard_dim
         self.hadamard_matrix = hadamard_transform(
             torch.eye(hadamard_dim, dtype=torch.float32, device="cuda"), scale=hadamard_dim**-0.5
         )
+        if group_dim is None:
+            group_dim = hadamard_dim
+        self.group_dim = group_dim
         self.rerotate = rerotate
         self.scale_dtype = scale_dtype
         self.unbiased = unbiased
@@ -151,7 +154,7 @@ class EdenSRQuantizer(BaseQuantizer):
         self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
         self.grid = self.grid.to(x.device).to(x.dtype)
         
-        x_had = F.linear(x.view(-1, self.hadamard_dim), self.hadamard_matrix)
+        x_had = F.linear(x.view(-1, self.hadamard_dim), self.hadamard_matrix).view(-1, self.group_dim)
         scales = x_had.abs().max(dim=-1, keepdim=True)[0]
         
         scales, global_scale = self.round_scales(scales)
