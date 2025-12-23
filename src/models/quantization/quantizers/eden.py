@@ -1,0 +1,193 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import numpy as np
+from scipy import integrate
+from scipy.stats import norm
+
+from fast_hadamard_transform import hadamard_transform
+
+from models.quantization.quantizers.base import BaseQuantizer
+
+
+def rtn_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+    inds = torch.bucketize(x, grid)
+
+    lo = torch.clamp(inds - 1, min=0, max=15)
+    hi = torch.clamp(inds,     min=0, max=15)
+
+    low = grid[lo]
+    high = grid[hi]
+
+    return torch.where(
+        (high - x) <= (x - low),
+        high,
+        low,
+    )
+
+
+def sr_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+    if (x > 6.0).any():
+        raise ValueError(f"Can't SR overflowing tensor: {x.max().item()} > 6")
+    
+    inds = torch.bucketize(x, grid)
+
+    lo = torch.clamp(inds - 1, min=0, max=15)
+    hi = torch.clamp(inds,     min=0, max=15)
+    
+    hi = torch.where(
+        hi == lo,
+        lo + 1,
+        hi,
+    )
+
+    low = grid[lo]
+    high = grid[hi]
+
+    return torch.where(
+        torch.bernoulli(
+            (x - low) / (high - low)
+        ) == 1.0,
+        high,
+        low,
+    )
+
+
+def sr_e4m3(x: torch.Tensor) -> torch.Tensor:
+    if (x > 448.0).any():
+        raise ValueError(f"Can't SR overflowing tensor: {x.max().item()} > 448")
+    
+    q = x.to(torch.float8_e4m3fn)
+    nextdq = (q.view(torch.uint8) + 1).view(torch.float8_e4m3fn).float()
+    prevdq = (q.view(torch.uint8) - 1).view(torch.float8_e4m3fn).float()
+    dq = q.float()
+
+    low = torch.where(
+        dq > x,
+        prevdq,
+        dq,
+    )
+    
+    high = torch.where(
+        dq > x,
+        dq,
+        nextdq,
+    )
+    
+    return torch.where(
+        torch.bernoulli(
+            (x - low) / (high - low)
+        ) == 1.0,
+        high,
+        low,
+    )
+    
+    
+def sr_e8m0(x: torch.Tensor) -> torch.Tensor:
+    low = 2 ** (torch.floor(torch.log2(x)))
+    high = low * 2
+    
+    return torch.where(
+        torch.bernoulli(
+            (x - low) / (high - low)
+        ) == 1.0,
+        high,
+        low,
+    )
+
+
+class EdenSRQuantizer(BaseQuantizer):
+    grid = torch.tensor(
+        [-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0,
+        0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0, 6.0],
+        device="cuda",
+    )
+    
+    def __init__(self, hadamard_dim=32, scale_dtype="fp32", unbiased="eden", rerotate=None):
+        super().__init__(4)
+        
+        self.hadamard_dim = hadamard_dim
+        self.hadamard_matrix = hadamard_transform(
+            torch.eye(hadamard_dim, dtype=torch.float32, device="cuda"), scale=hadamard_dim**-0.5
+        )
+        self.rerotate = rerotate
+        self.scale_dtype = scale_dtype
+        self.unbiased = unbiased
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}("
+            f"hadamard_dim={self.hadamard_dim}, "
+            f"scale_dtype={self.scale_dtype}, "
+            f"unbiased={self.unbiased}, "
+            f"rerotate={self.rerotate})"
+        )
+        
+    def round_scales(self, scales: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+        if self.scale_dtype == "fp32":
+            return scales / 6.0, torch.tensor([1.0], device=scales.device, dtype=scales.dtype)
+        elif self.scale_dtype == "e4m3":
+            global_scale = scales.max() / 256.0
+            scales = scales / global_scale / 6.0
+            scales = scales.to(torch.float8_e4m3fn).float()
+            return scales, global_scale * (16 / 15)
+        elif self.scale_dtype == "e8m0":
+            scales = 2 ** (torch.floor(torch.log2(scales)))
+            return scales, torch.tensor([1 / 3.0], device=scales.device, dtype=scales.dtype)
+        
+    def apply_correction(self, scales: torch.Tensor, correction: torch.Tensor) -> torch.Tensor:
+        if self.scale_dtype == "fp32":
+            return scales * correction
+        elif self.scale_dtype == "e4m3":
+            # scales must remain E4M3 representable
+            return sr_e4m3(scales * correction)
+        elif self.scale_dtype == "e8m0":
+            # scales must remain E8M0 representable
+            scales = 2 ** (torch.floor(torch.log2(scales)))
+            return sr_e8m0(scales * correction)
+    
+    def forward(self, x):
+        self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
+        self.grid = self.grid.to(x.device).to(x.dtype)
+        
+        x_had = F.linear(x.view(-1, self.hadamard_dim), self.hadamard_matrix)
+        scales = x_had.abs().max(dim=-1, keepdim=True)[0]
+        
+        scales, global_scale = self.round_scales(scales)
+        
+        x_scaled = x_had / scales / global_scale
+        if self.unbiased == "no":
+            x_fp4 = rtn_fp4(x_scaled, self.grid)
+        elif self.unbiased == "sr":
+            x_fp4 = sr_fp4(x_scaled, self.grid)
+        elif self.unbiased == "eden":
+            x_fp4 = rtn_fp4(x_scaled, self.grid)
+            num = (x_scaled * x_scaled).sum(dim=-1, keepdim=True)
+            denom = (x_scaled * x_fp4).sum(dim=-1, keepdim=True)
+            correction = num / denom
+            correction = torch.where(correction.isnan(), 1.0, correction)
+            
+            scales = self.apply_correction(scales, correction)
+        else:
+            raise ValueError(f"Unsupported unbiased method: {self.unbiased}")
+
+        return (x_had + (x_fp4 * scales * global_scale - x_had).detach()).reshape_as(x)
+
+    def re_randomize(self):
+        if self.rerotate == "signs":
+            self.hadamard_matrix = self.hadamard_matrix @ torch.diag(
+                torch.randint(
+                    0, 2, (self.hadamard_dim,),
+                    device=self.hadamard_matrix.device,
+                    dtype=self.hadamard_matrix.dtype
+                ) * 2 - 1
+            )
+        elif self.rerotate == "O32":
+            gaussian_matrix = torch.randn(self.hadamard_dim, self.hadamard_dim, device=self.hadamard_matrix.device, dtype=self.hadamard_matrix.dtype)
+            svd = torch.linalg.svd(gaussian_matrix)
+            self.hadamard_matrix = svd[0] @ svd[2]
+        elif self.rerotate is None:
+            pass
+        else:
+            raise ValueError(f"Invalid rerotate value: {self.rerotate}")
