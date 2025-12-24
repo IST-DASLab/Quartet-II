@@ -28,8 +28,8 @@ def rtn_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 
 def sr_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-    if (x.abs() > 6.001).any():
-        raise ValueError(f"Can't SR overflowing tensor: {x.abs().max().item()} > 6")
+    # if (x.abs() > 6.001).any():
+    #     raise ValueError(f"Can't SR overflowing tensor: {x.abs().max().item()} > 6")
     x = torch.clamp(x, -6.0, 6.0)
     
     inds = torch.bucketize(x, grid)
@@ -56,9 +56,9 @@ def sr_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 
 def sr_e4m3(x: torch.Tensor) -> torch.Tensor:
-    if (x > 448.001).any():
-        raise ValueError(f"Can't SR overflowing tensor: {x.max().item()} > 448")
-    x = torch.clamp(x, -448.0, 448.0)
+    # if (x > 448.001).any():
+    #     raise ValueError(f"Can't SR overflowing tensor: {x.max().item()} > 448")
+    x = torch.clamp(x, -447.99, 447.99) # insure 448 isnt low to prevent high from becoming NaN
     
     if x.isnan().any():
         raise ValueError("x has NaNs")
