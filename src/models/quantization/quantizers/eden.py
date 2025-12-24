@@ -149,15 +149,19 @@ class EdenSRQuantizer(BaseQuantizer):
             return scales, torch.tensor([1 / 3.0], device=scales.device, dtype=scales.dtype)
         
     def apply_correction(self, scales: torch.Tensor, correction: torch.Tensor) -> torch.Tensor:
+        scales = scales.view(correction.size(0), -1)
+        corrected_scales = (scales * correction).view(-1, 1)
+
         if self.scale_dtype == "fp32":
-            return scales * correction
+            return corrected_scales
         elif self.scale_dtype == "e4m3":
             # scales must remain E4M3 representable
-            return sr_e4m3(scales * correction)
+            return sr_e4m3(corrected_scales)
         elif self.scale_dtype == "e8m0":
             # scales must remain E8M0 representable
-            scales = 2 ** (torch.floor(torch.log2(scales)))
-            return sr_e8m0(scales * correction)
+            return sr_e8m0(corrected_scales)
+        else:
+            raise ValueError(f"Unknown scale_dtype: {self.scale_dtype}")
     
     def forward(self, x):
         self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
@@ -175,12 +179,18 @@ class EdenSRQuantizer(BaseQuantizer):
             x_fp4 = sr_fp4(x_scaled, self.grid)
         elif self.unbiased == "eden":
             x_fp4 = rtn_fp4(x_scaled, self.grid)
+            
+            x_fp4 = x_fp4.view(-1, self.hadamard_dim)
+            x_scaled = x_scaled.view(-1, self.hadamard_dim)
+            
             num = (x_scaled * x_scaled).sum(dim=-1, keepdim=True)
             denom = (x_scaled * x_fp4).sum(dim=-1, keepdim=True)
             correction = num / denom
             correction = torch.where(correction.isnan(), 1.0, correction)
             
             scales = self.apply_correction(scales, correction)
+            
+            x_fp4 = x_fp4.view(-1, self.group_dim)
         else:
             raise ValueError(f"Unsupported unbiased method: {self.unbiased}")
 
