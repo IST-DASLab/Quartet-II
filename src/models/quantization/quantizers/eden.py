@@ -113,7 +113,7 @@ class EdenSRQuantizer(BaseQuantizer):
         device="cuda",
     )
     
-    def __init__(self, hadamard_dim=32, group_dim=None, scale_dtype="fp32", unbiased="eden", rerotate=None):
+    def __init__(self, hadamard_dim=32, group_dim=None, scale_dtype="fp32", unbiased="eden", rerotate=None, scale_override:float=1.0):
         super().__init__(4)
         
         self.hadamard_dim = hadamard_dim
@@ -126,6 +126,10 @@ class EdenSRQuantizer(BaseQuantizer):
         self.rerotate = rerotate
         self.scale_dtype = scale_dtype
         self.unbiased = unbiased
+        self.scale_override = scale_override
+        
+        if scale_override != 1 and unbiased == "sr":
+            raise ValueError("Scale Override is incompatible with Stochastic Rounding")
 
     def __repr__(self):
         return (
@@ -133,20 +137,21 @@ class EdenSRQuantizer(BaseQuantizer):
             f"hadamard_dim={self.hadamard_dim}, "
             f"scale_dtype={self.scale_dtype}, "
             f"unbiased={self.unbiased}, "
+            f"scale_override={self.scale_override}, "
             f"rerotate={self.rerotate})"
         )
         
     def round_scales(self, scales: torch.Tensor) -> (torch.Tensor, torch.Tensor):
         if self.scale_dtype == "fp32":
-            return scales, torch.tensor([1.0 / 6.0], device=scales.device, dtype=scales.dtype)
+            return scales, torch.tensor([1.0 / 6.0 * self.scale_override], device=scales.device, dtype=scales.dtype)
         elif self.scale_dtype == "e4m3":
             global_scale = scales.max() / 256.0
             scales = scales / global_scale
             scales = scales.to(torch.float8_e4m3fn).float()
-            return scales, global_scale / 6.0 * (17 / 16)
+            return scales, global_scale / 6.0 * (17 / 16) * self.scale_override
         elif self.scale_dtype == "e8m0":
             scales = 2 ** (torch.floor(torch.log2(scales)))
-            return scales, torch.tensor([1 / 3.0], device=scales.device, dtype=scales.dtype)
+            return scales, torch.tensor([1 / 3.0 * self.scale_override], device=scales.device, dtype=scales.dtype)
         
     def apply_correction(self, scales: torch.Tensor, correction: torch.Tensor) -> torch.Tensor:
         scales = scales.view(correction.size(0), -1)
