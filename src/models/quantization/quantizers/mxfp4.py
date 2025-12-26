@@ -51,13 +51,13 @@ class AlbertTsengQuantizer(BaseQuantizer):
 
     def re_randomize(self):
         if self.rerotate == "signs":
-            self.hadamard_matrix = self.hadamard_matrix @ torch.diag(
+            self.hadamard_matrix = torch.diag(
                 torch.randint(
                     0, 2, (self.hadamard_dim,),
                     device=self.hadamard_matrix.device,
                     dtype=self.hadamard_matrix.dtype
                 ) * 2 - 1
-            )
+            ) @ self.hadamard_matrix
         elif self.rerotate == "O32":
             gaussian_matrix = torch.randn(self.hadamard_dim, self.hadamard_dim, device=self.hadamard_matrix.device, dtype=self.hadamard_matrix.dtype)
             svd = torch.linalg.svd(gaussian_matrix)
