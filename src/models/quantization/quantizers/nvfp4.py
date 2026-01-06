@@ -60,7 +60,8 @@ class Nvfp4Quantizer(BaseQuantizer):
         return scales, global_scale / 6.0 * self.scale_override
 
     def forward(self, x):
-        self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
+        if hasattr(self, "hadamard_matrix"):
+            self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
         self.grid = self.grid.to(x.device).to(x.dtype)
         
         if self.hadamard_dim != 1:
