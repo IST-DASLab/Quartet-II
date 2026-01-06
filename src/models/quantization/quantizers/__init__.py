@@ -60,6 +60,10 @@ from .eden import (
     EdenSRQuantizer,
 )
 
+from .nvfp4 import (
+    Nvfp4Quantizer
+)
+
 QUANTIZER_CLASSES = {
     "NoQuantizer": NoQuantizer,
     "NoiseQuantizer": NoiseQuantizer,
@@ -102,4 +106,5 @@ QUANTIZER_CLASSES = {
     "QuestMXFP4Quantizer" : QuestMXFP4Quantizer,
     "AlignedAlbertTsengQuantizer": AlignedAlbertTsengQuantizer,
     "EdenSRQuantizer": EdenSRQuantizer,
+    "Nvfp4Quantizer": Nvfp4Quantizer,
 }
