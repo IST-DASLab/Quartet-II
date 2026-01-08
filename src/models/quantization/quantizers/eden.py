@@ -31,6 +31,8 @@ def sr_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     # if (x.abs() > 6.001).any():
     #     raise ValueError(f"Can't SR overflowing tensor: {x.abs().max().item()} > 6")
     x = torch.clamp(x, -6.0, 6.0)
+    if x.isnan().any():
+        raise ValueError("x has NaNs")
     
     inds = torch.bucketize(x, grid)
 
@@ -146,9 +148,17 @@ class EdenSRQuantizer(BaseQuantizer):
             return scales, torch.tensor([1.0 / 6.0 * self.scale_override], device=scales.device, dtype=scales.dtype)
         elif self.scale_dtype == "e4m3":
             global_scale = scales.max() / 256.0
+            global_scale[global_scale == 0] = 1.0
             scales = scales / global_scale
             scales = scales.to(torch.float8_e4m3fn).float()
+            scales[scales == 0] = 1.0
             return scales, global_scale / 6.0 * (17 / 16) * self.scale_override
+            # s_dec = scales.max() / 447.99 * 6.0
+            # s_dec[s_dec == 0] = 1.0
+            # s_dec_b = scales / 6.0
+            # s_dec_b_e4m3 = (s_dec_b / s_dec).to(torch.float8_e4m3fn).float()
+            # s_dec_b_e4m3[s_dec_b_e4m3 == 0] = 1.0
+            # return s_dec_b_e4m3, s_dec * self.scale_override
         elif self.scale_dtype == "e8m0":
             scales = 2 ** (torch.floor(torch.log2(scales)))
             return scales, torch.tensor([1 / 3.0 * self.scale_override], device=scales.device, dtype=scales.dtype)
