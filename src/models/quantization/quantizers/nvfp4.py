@@ -54,15 +54,12 @@ class Nvfp4Quantizer(BaseQuantizer):
         )
         
     def round_scales(self, scales):            
-        global_scale = scales.max() / 256.0
-        scales = scales / global_scale
-        scales = scales.to(torch.float8_e4m3fn).float()
-        scales = torch.where(
-            scales == 0.0,
-            1.0,
-            scales,
-        )
-        return scales, global_scale / 6.0 * self.scale_override
+        s_enc = 447.99 * 6.0 / scales.max()
+        s_dec = 1 / s_enc
+        s_dec_b = scales / 6.0
+        s_dec_b_e4m3 = (s_dec_b * s_enc).to(torch.float8_e4m3fn).float()
+        s_enc_b_inv = s_dec_b_e4m3 * s_dec
+        return s_enc_b_inv
 
     def forward(self, x):
         if hasattr(self, "hadamard_matrix"):
@@ -72,7 +69,7 @@ class Nvfp4Quantizer(BaseQuantizer):
         if self.hadamard_dim != 1:
             x_had = F.linear(x.view(-1, self.hadamard_dim), self.hadamard_matrix).view_as(x)
         else:
-            x_had = x
+            x_had = x.clone()
 
         with torch.no_grad():  
             if self.square:
@@ -81,16 +78,18 @@ class Nvfp4Quantizer(BaseQuantizer):
                 x_grouped = x_had.view(-1, 16)
             
             scales = x_grouped.abs().max(dim=-1, keepdim=True)[0]
-            scales, global_scale = self.round_scales(scales)
-            x_scaled = x_grouped / scales / global_scale
-            x_fp4 = rtn_fp4(x_scaled, self.grid) * scales * global_scale
+            s_enc_b_inv = self.round_scales(scales)
+            x_fp4 = rtn_fp4(x_grouped / s_enc_b_inv, self.grid) * s_enc_b_inv
             
             if self.square:    
                 x_fp4 = x_fp4.reshape(x.shape[0] // 16, x.shape[1] // 16, 16, 16).permute(0, 2, 1, 3).reshape_as(x)
             else:
                 x_fp4 = x_fp4.view_as(x)
 
-        return (x_had + (x_fp4 - x_had).detach())
+        if self.hadamard_dim != 1: 
+            return (x_had + (x_fp4 - x_had).detach())
+        else:
+            return x + (x_fp4 - x).detach()
 
 
 class QuestNvfp4Quantizer(BaseQuantizer):
