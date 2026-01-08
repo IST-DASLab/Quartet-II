@@ -17,6 +17,42 @@ class EW_EtX_Scheme(nn.Module):
         return F.linear(x, w, None)
 
 
+# ===== Q(E)W_EtX =====
+class QEW_EtXFn(Function):
+    @staticmethod
+    def forward(ctx, x, w, g_quantizer):
+        ctx.save_for_backward(x, w)
+        ctx.g_quantizer = g_quantizer
+        return F.linear(x, w, None)
+    
+    @staticmethod
+    def backward(ctx, e):
+        x, w = ctx.saved_tensors
+
+        grad_x = F.linear(
+            ctx.g_quantizer(e),
+            w.T,
+            None,
+        ) # Q(E)W
+
+        batch_seq_dim = math.prod(x.shape[:-1])
+        grad_w = torch.einsum(
+            "bi,bj->ij",
+            e.reshape(batch_seq_dim, -1),
+            x.reshape(batch_seq_dim, -1),
+        ) # EtX
+
+        return grad_x, grad_w, None
+
+
+class QEW_EtX_Scheme(EW_EtX_Scheme):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, w):
+        return QEW_EtXFn.apply(x, w, self.g_quantizer)
+
+
 # ===== Q(E)W_Q(Et)X =====
 class QEW_QEtXFn(Function):
     @staticmethod
@@ -175,6 +211,7 @@ class QEQWtt_QEtQXtt_Scheme(QEW_QEtX_Scheme):
 # ===== BACKWARD SCHEMES =====
 BACKWARD_SCHEMES = {
     "EW_EtX": EW_EtX_Scheme,
+    "Q(E)W_EtX": QEW_EtX_Scheme,
     "Q(E)W_Q(Et)X": QEW_QEtX_Scheme,
     "Q(E)Q(Wt)t_EtX": QEQWtt_EtX_Scheme,
     "EW_Q(Et)Q(Xt)t": EW_QEtQXtt_Scheme,
