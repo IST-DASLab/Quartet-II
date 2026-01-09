@@ -9,6 +9,7 @@ from scipy.stats import norm
 from fast_hadamard_transform import hadamard_transform
 
 from models.quantization.quantizers.base import BaseQuantizer
+from .nvfp4_triton import isolated_eden_sr_kernel_wrapper
 
 
 def rtn_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
@@ -231,7 +232,18 @@ class EdenSRQuantizer(BaseQuantizer):
 
 
 class IsolatedEdenQuantizer(EdenSRQuantizer): # Specifically for testing backward without weight re-quant
-    def forward(self, x):        
+    def forward(self, x):
+        if (
+            self.hadamard_dim == 1 and
+            self.scale_dtype == "e4m3" and
+            self.unbiased == "sr"
+        ):
+            return isolated_eden_sr_kernel_wrapper(
+                x,
+                self.scale_override,
+                self.group_dim,
+            )
+        
         self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
         self.grid = self.grid.to(x.device).to(x.dtype)
         
