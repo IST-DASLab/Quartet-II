@@ -415,7 +415,6 @@ def eden_1x16s_fp4_kernel_wrapper(
     group_size: int,
 ):
     x = x.contiguous()
-    hadamard_matrix = hadamard_matrix.T.contigious()
     output = torch.empty_like(x)
     seed = randint(0, 1000000)
     
