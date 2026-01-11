@@ -325,7 +325,7 @@ def eden_1x16s_fp4_kernel(
         1.0,
         scales,
     )
-    global_scale = global_scale / 6.0 * scale_override
+    global_scale = global_scale / 6.0 * (17 / 16) * scale_override
     
     x_scaled = x_grouped / scales / global_scale
     
@@ -336,20 +336,20 @@ def eden_1x16s_fp4_kernel(
         1,
         -1,
     )
-    x_fp4_abs = tl.where(
-        x_scaled_abs >= 5,
+    x_fp4 = tl.where(
+        x_scaled_abs > 5,
         6,
         tl.where(
-            x_scaled_abs >= 3.5,
+            x_scaled_abs > 3.5,
             4,
             tl.where(
-                x_scaled_abs >= 2.5,
+                x_scaled_abs > 2.5,
                 3,
                 tl.where(
-                    x_scaled_abs >= 1.75,
+                    x_scaled_abs > 1.75,
                     2,
                     tl.where(
-                        x_scaled_abs >= 1.25,
+                        x_scaled_abs > 1.25,
                         1.5,
                         tl.where(
                             x_scaled_abs > 0.75,
@@ -357,19 +357,18 @@ def eden_1x16s_fp4_kernel(
                             tl.where(
                                 x_scaled_abs > 0.25,
                                 0.5,
-                                0.0,
+                                0,
                             )
                         )
                     )
                 )
             )
         )
-    )
-    x_fp4 = x_fp4_abs * x_scaled_sign
+    ) * x_scaled_sign
     
     # Calculate EDEN scale
     x_scaled = tl.reshape(x_scaled, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
-    x_fp4 = tl.reshae(x_fp4, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
+    x_fp4 = tl.reshape(x_fp4, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
     
     num = tl.sum(x_scaled * x_scaled, axis=-1, keep_dims=True)
     denom = tl.sum(x_scaled * x_fp4, axis=-1, keep_dims=True)
@@ -386,8 +385,21 @@ def eden_1x16s_fp4_kernel(
     
     bitscales = tl.cast(corrected_scales.to(tl.float8e4nv), tl.uint8, bitcast=True)
     prevscale = tl.cast((bitscales - 1), tl.float8e4nv, bitcast=True).to(tl.float32)
+    currscale = tl.cast((bitscales), tl.float8e4nv, bitcast=True).to(tl.float32)
     nextscale = tl.cast((bitscales + 1), tl.float8e4nv, bitcast=True).to(tl.float32)
-    prob_up = (corrected_scales - prevscale) / (nextscale - prevscale)
+    
+    up = tl.where(
+        currscale > corrected_scales,
+        currscale,
+        nextscale,
+    )
+    down = tl.where(
+        currscale > corrected_scales,
+        prevscale,
+        currscale,
+    )
+    
+    prob_up = (corrected_scales - down) / (up - down)
     
     scale_start_idx = pid * (BLOCK_SIZE // group_size)
     scale_offsets = scale_start_idx + tl.arange(0, BLOCK_SIZE // group_size)
@@ -395,9 +407,11 @@ def eden_1x16s_fp4_kernel(
     
     scales = tl.where(
         sampled_prob < prob_up,
-        nextscale,
-        prevscale,
+        up,
+        down,
     )
+    scales = tl.reshape(scales, (BLOCK_SIZE // group_size, 1))
+    x_fp4 = tl.reshape(x_fp4, (BLOCK_SIZE // group_size, group_size))
     
     # Reshape back to flat form for storage
     x_dequantized = x_fp4 * scales * global_scale
