@@ -55,7 +55,7 @@ class Nvfp4Quantizer(BaseQuantizer):
         )
         
     def round_scales(self, scales):            
-        s_dec = scales.max() / 447.99 * 6.0
+        s_dec = scales.max() / (447.99 * 6.0)
         s_dec[s_dec == 0] = 1.0
         s_dec_b = scales / 6.0
         s_dec_b_e4m3 = (s_dec_b / s_dec).to(torch.float8_e4m3fn).float()
@@ -72,12 +72,14 @@ class Nvfp4Quantizer(BaseQuantizer):
             self.hadamard_dim == 1 and
             not self.square
         ):
-            return rtn_1x16s_fp4_autograd.apply(x, self.scale_override, 16)
+            amax = torch.amax(x)
+            return rtn_1x16s_fp4_autograd.apply(x, self.scale_override, 16, amax)
         elif (
             self.hadamard_dim == 1 and
             self.square
         ):
-            return rtn_16x16s_fp4_autograd.apply(x, self.scale_override, 16)
+            amax = torch.amax(x)
+            return rtn_16x16s_fp4_autograd.apply(x, self.scale_override, 16, amax)
             
         
         if self.hadamard_dim != 1:

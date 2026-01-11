@@ -17,6 +17,7 @@ import triton.language as tl
 @triton.jit
 def rtn_1x16s_fp4_kernel(
     x_ptr,
+    amax_ptr,
     output_ptr,
     n_elements: tl.constexpr,
     scale_override: tl.constexpr,
@@ -30,27 +31,27 @@ def rtn_1x16s_fp4_kernel(
     mask = offsets < n_elements
     x_flat = tl.load(x_ptr + offsets, mask=mask)
     
+    # amax
+    amax = tl.load(amax_ptr)
+    s_dec = tl.where(
+        amax == 0.0,
+        1.0,
+        amax / (447.99 * 6.0),
+    )
+    
     # group
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
     
     # scale
-    scales = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True)
-    global_scale = tl.max(scales) / 447.99
-    global_scale = tl.where(
-        global_scale == 0,
+    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / 6.0
+    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
+    s_dec_b_e4m3 = tl.where(
+        s_dec_b_e4m3 == 0,
         1.0,
-        global_scale,
+        s_dec_b_e4m3,
     )
-    scales = scales / global_scale
-    scales = scales.to(tl.float8e4nv).to(tl.float32)
-    scales = tl.where(
-        scales == 0,
-        1.0,
-        scales,
-    )
-    global_scale = global_scale / 6.0 * scale_override
-    
-    x_scaled = x_grouped / scales / global_scale
+    s_enc_b_inv = s_dec_b_e4m3 * s_dec
+    x_scaled = x_grouped / s_enc_b_inv
     
     # quantize
     x_scaled_abs = tl.abs(x_scaled)
@@ -75,10 +76,10 @@ def rtn_1x16s_fp4_kernel(
                         x_scaled_abs >= 1.25,
                         1.5,
                         tl.where(
-                            x_scaled_abs > 0.75,
+                            x_scaled_abs >= 0.75,
                             1,
                             tl.where(
-                                x_scaled_abs > 0.25,
+                                x_scaled_abs >= 0.25,
                                 0.5,
                                 0.0,
                             )
@@ -91,7 +92,7 @@ def rtn_1x16s_fp4_kernel(
     x_fp4 = x_fp4_abs * x_scaled_sign
 
     # dequantize
-    x_dequantized = x_fp4 * scales * global_scale
+    x_dequantized = x_fp4 * s_enc_b_inv
     
     # Reshape back to flat form for storage
     x_dequantized_flat = tl.reshape(x_dequantized, (BLOCK_SIZE,))
@@ -105,6 +106,7 @@ def rtn_1x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
+    amax: torch.Tensor,
 ):
     x = x.contiguous()
     output = torch.empty_like(x)
@@ -114,6 +116,7 @@ def rtn_1x16s_fp4_kernel_wrapper(
     
     rtn_1x16s_fp4_kernel[grid](
         x_ptr=x,
+        amax_ptr=amax,
         output_ptr=output,
         n_elements=n_elements,
         scale_override=scale_override,
@@ -123,12 +126,12 @@ def rtn_1x16s_fp4_kernel_wrapper(
 
 class rtn_1x16s_fp4_autograd(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale_override, group_size):
-        return rtn_1x16s_fp4_kernel_wrapper(x, scale_override, group_size)
+    def forward(ctx, x, scale_override, group_size, amax):
+        return rtn_1x16s_fp4_kernel_wrapper(x, scale_override, group_size, amax)
     
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None, None
+        return grad_output, None, None, None
 
 
 @triton.autotune(
@@ -142,6 +145,7 @@ class rtn_1x16s_fp4_autograd(torch.autograd.Function):
 @triton.jit
 def rtn_16x16s_fp4_kernel(
     x_ptr,
+    amax_ptr,
     output_ptr,
     n_row: tl.constexpr,
     n_col: tl.constexpr,
@@ -162,6 +166,14 @@ def rtn_16x16s_fp4_kernel(
     x_flat = tl.load(x_ptr + offsets, mask=mask)
     # [BLOCK_SIZE, BLOCK_SIZE]
     
+    # amax
+    amax = tl.load(amax_ptr)
+    s_dec = tl.where(
+        amax == 0.0,
+        1.0,
+        amax / (447.99 * 6.0),
+    )
+    
     # group
     x_grouped =  x_flat.reshape(
         BLOCK_SIZE // group_size, group_size, BLOCK_SIZE // group_size, group_size
@@ -172,23 +184,15 @@ def rtn_16x16s_fp4_kernel(
     )
     
     # scale
-    scales = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True)
-    global_scale = tl.max(scales) / 447.99
-    global_scale = tl.where(
-        global_scale == 0,
+    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / 6.0
+    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
+    s_dec_b_e4m3 = tl.where(
+        s_dec_b_e4m3 == 0,
         1.0,
-        global_scale,
+        s_dec_b_e4m3,
     )
-    scales = scales / global_scale
-    scales = scales.to(tl.float8e4nv).to(tl.float32)
-    scales = tl.where(
-        scales == 0,
-        1.0,
-        scales,
-    )
-    global_scale = global_scale / 6.0 * scale_override
-    
-    x_scaled = x_grouped / scales / global_scale
+    s_enc_b_inv = s_dec_b_e4m3 * s_dec
+    x_scaled = x_grouped / s_enc_b_inv
     
     # quantize
     x_scaled_abs = tl.abs(x_scaled)
@@ -213,10 +217,10 @@ def rtn_16x16s_fp4_kernel(
                         x_scaled_abs >= 1.25,
                         1.5,
                         tl.where(
-                            x_scaled_abs > 0.75,
+                            x_scaled_abs >= 0.75,
                             1,
                             tl.where(
-                                x_scaled_abs > 0.25,
+                                x_scaled_abs >= 0.25,
                                 0.5,
                                 0.0,
                             )
@@ -229,7 +233,7 @@ def rtn_16x16s_fp4_kernel(
     x_fp4 = x_fp4_abs * x_scaled_sign
 
     # dequantize
-    x_dequantized = x_fp4 * scales * global_scale
+    x_dequantized = x_fp4 * s_enc_b_inv
     # [BLOCK_SIZE // group_size * BLOCK_SIZE // group_size, group_size * group_size]
     
     # Reshape back to flat form for storage
@@ -249,6 +253,7 @@ def rtn_16x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
+    amax,
 ):
     assert x.dim() == 2
     x = x.contiguous()
@@ -260,6 +265,7 @@ def rtn_16x16s_fp4_kernel_wrapper(
     
     rtn_16x16s_fp4_kernel[grid](
         x_ptr=x,
+        amax_ptr=amax,
         output_ptr=output,
         n_row=n_row,
         n_col=n_col,
@@ -270,12 +276,12 @@ def rtn_16x16s_fp4_kernel_wrapper(
 
 class rtn_16x16s_fp4_autograd(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale_override, group_size):
-        return rtn_16x16s_fp4_kernel_wrapper(x, scale_override, group_size)
+    def forward(ctx, x, scale_override, group_size, amax):
+        return rtn_16x16s_fp4_kernel_wrapper(x, scale_override, group_size, amax)
     
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None, None
+        return grad_output, None, None, None
 
 
 @triton.autotune(
@@ -290,13 +296,14 @@ class rtn_16x16s_fp4_autograd(torch.autograd.Function):
 @triton.jit
 def sr_1x16s_fp4_kernel(
     x_ptr,
+    amax_ptr,
     output_ptr,
     n_elements: tl.constexpr,
     scale_override: tl.constexpr,
     group_size: tl.constexpr,
     seed: int,
     BLOCK_SIZE: tl.constexpr,
-):        
+):
     # load x
     pid = tl.program_id(0)
     start_idx = pid * BLOCK_SIZE
@@ -307,24 +314,24 @@ def sr_1x16s_fp4_kernel(
     # group
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
     
-    # scale
-    scales = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True)
-    global_scale = tl.max(scales) / 256.0
-    global_scale = tl.where(
-        global_scale == 0,
+    # amax
+    amax = tl.load(amax_ptr)
+    s_dec = tl.where(
+        amax == 0.0,
         1.0,
-        global_scale,
+        amax / (447.99 * 6.0),
     )
-    scales = scales / global_scale
-    scales = scales.to(tl.float8e4nv).to(tl.float32)
-    scales = tl.where(
-        scales == 0,
-        1.0,
-        scales,
-    )
-    global_scale = global_scale / 6.0 * (17 / 16) * scale_override
     
-    x_scaled = x_grouped / scales / global_scale
+    # scale
+    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / 6.0 / (17 / 16)
+    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
+    s_dec_b_e4m3 = tl.where(
+        s_dec_b_e4m3 == 0,
+        1.0,
+        s_dec_b_e4m3,
+    )
+    s_enc_b_inv = s_dec_b_e4m3 * s_dec
+    x_scaled = x_grouped / s_enc_b_inv
     
     # quantize
     x_scaled_abs = tl.abs(x_scaled)
@@ -334,22 +341,22 @@ def sr_1x16s_fp4_kernel(
         -1,
     )
     x_fp4_high = tl.where(
-        x_scaled_abs > 4,
+        x_scaled_abs >= 4,
         6,
         tl.where(
-            x_scaled_abs > 3,
+            x_scaled_abs >= 3,
             4,
             tl.where(
-                x_scaled_abs > 2,
+                x_scaled_abs >= 2,
                 3,
                 tl.where(
-                    x_scaled_abs > 1.5,
+                    x_scaled_abs >= 1.5,
                     2,
                     tl.where(
-                        x_scaled_abs > 1.0,
+                        x_scaled_abs >= 1.0,
                         1.5,
                         tl.where(
-                            x_scaled_abs > 0.5,
+                            x_scaled_abs >= 0.5,
                             1,
                             0.5,
                         )
@@ -394,7 +401,7 @@ def sr_1x16s_fp4_kernel(
     ) * x_scaled_sign
 
     # dequantize
-    x_dequantized = x_fp4 * scales * global_scale
+    x_dequantized = x_fp4 * s_enc_b_inv
     
     # Reshape back to flat form for storage
     x_dequantized_flat = tl.reshape(x_dequantized, (BLOCK_SIZE,))
@@ -408,6 +415,7 @@ def sr_1x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
+    amax,
 ):
     x = x.contiguous()
     output = torch.empty_like(x)
@@ -418,6 +426,7 @@ def sr_1x16s_fp4_kernel_wrapper(
     
     sr_1x16s_fp4_kernel[grid](
         x_ptr=x,
+        amax_ptr=amax,
         output_ptr=output,
         n_elements=n_elements,
         scale_override=scale_override,
@@ -439,7 +448,7 @@ def sr_1x16s_fp4_kernel_wrapper(
 @triton.jit
 def eden_1x16s_fp4_kernel(
     x_ptr,
-    hadamard_matrix_ptr,
+    amax_ptr,
     output_ptr,
     n_elements: tl.constexpr,
     hadamard_dim: tl.constexpr,
@@ -447,11 +456,7 @@ def eden_1x16s_fp4_kernel(
     group_size: tl.constexpr,
     seed: int,
     BLOCK_SIZE: tl.constexpr,
-):
-    # load hadamard_matrix
-    offsets_hadamard = tl.arange(0, hadamard_dim * hadamard_dim)
-    hadamard_matrix = tl.load(hadamard_matrix_ptr + offsets_hadamard).reshape(hadamard_dim, hadamard_dim)
-    
+):    
     # load x
     pid = tl.program_id(0)
     start_idx = pid * BLOCK_SIZE
@@ -459,31 +464,26 @@ def eden_1x16s_fp4_kernel(
     mask = offsets < n_elements
     x_flat = tl.load(x_ptr + offsets, mask=mask)
     
-    # hadamard transform
-    x = tl.reshape(x_flat, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
-    x_had = tl.dot(x, hadamard_matrix)
-    
     # group
-    x_grouped = tl.reshape(x_had, (BLOCK_SIZE // group_size, group_size))
+    x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
+    
+    # amax
+    amax = tl.load(amax_ptr)
+    s_dec = tl.where(
+        amax == 0.0,
+        1.0,
+        amax / (447.99 * 6.0),
+    )
     
     # scale
-    scales = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True)
-    global_scale = tl.max(scales) / 256.0
-    global_scale = tl.where(
-        global_scale == 0,
+    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / 6.0 / (17 / 16)
+    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
+    s_dec_b_e4m3 = tl.where(
+        s_dec_b_e4m3 == 0,
         1.0,
-        global_scale,
+        s_dec_b_e4m3,
     )
-    scales = scales / global_scale
-    scales = scales.to(tl.float8e4nv).to(tl.float32)
-    scales = tl.where(
-        scales == 0,
-        1.0,
-        scales,
-    )
-    global_scale = global_scale / 6.0 * (17 / 16) * scale_override
-    
-    x_scaled = x_grouped / scales / global_scale
+    x_scaled = x_grouped / (s_dec_b_e4m3 * s_dec)
     
     # quantize
     x_scaled_abs = tl.abs(x_scaled)
@@ -493,25 +493,25 @@ def eden_1x16s_fp4_kernel(
         -1,
     )
     x_fp4 = tl.where(
-        x_scaled_abs > 5,
+        x_scaled_abs >= 5,
         6,
         tl.where(
-            x_scaled_abs > 3.5,
+            x_scaled_abs >= 3.5,
             4,
             tl.where(
-                x_scaled_abs > 2.5,
+                x_scaled_abs >= 2.5,
                 3,
                 tl.where(
-                    x_scaled_abs > 1.75,
+                    x_scaled_abs >= 1.75,
                     2,
                     tl.where(
-                        x_scaled_abs > 1.25,
+                        x_scaled_abs >= 1.25,
                         1.5,
                         tl.where(
-                            x_scaled_abs > 0.75,
+                            x_scaled_abs >= 0.75,
                             1,
                             tl.where(
-                                x_scaled_abs > 0.25,
+                                x_scaled_abs >= 0.25,
                                 0.5,
                                 0,
                             )
@@ -536,7 +536,7 @@ def eden_1x16s_fp4_kernel(
     )
     
     # Apply EDEN scale
-    scales = tl.reshape(scales, (BLOCK_SIZE // hadamard_dim, hadamard_dim // group_size))
+    scales = tl.reshape(s_dec_b_e4m3, (BLOCK_SIZE // hadamard_dim, hadamard_dim // group_size))
     corrected_scales = tl.reshape(scales * correction, (BLOCK_SIZE // group_size, 1))
     
     bitscales = tl.cast(corrected_scales.to(tl.float8e4nv), tl.uint8, bitcast=True)
@@ -570,7 +570,7 @@ def eden_1x16s_fp4_kernel(
     x_fp4 = tl.reshape(x_fp4, (BLOCK_SIZE // group_size, group_size))
     
     # Reshape back to flat form for storage
-    x_dequantized = x_fp4 * scales * global_scale
+    x_dequantized = x_fp4 * scales * s_dec
     x_dequantized_flat = tl.reshape(x_dequantized, (BLOCK_SIZE,))
     
     # store
@@ -580,25 +580,22 @@ def eden_1x16s_fp4_kernel(
 @torch.compiler.disable()
 def eden_1x16s_fp4_kernel_wrapper(
     x,
-    hadamard_matrix,
     scale_override: float,
     group_size: int,
+    amax,
 ):
     x = x.contiguous()
-    hadamard_matrix = hadamard_matrix.T.contiguous()
     output = torch.empty_like(x)
     seed = randint(0, 1000000)
     
-    hadamard_dim = hadamard_matrix.size(0)
     n_elements = x.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
     
     eden_1x16s_fp4_kernel[grid](
         x_ptr=x,
-        hadamard_matrix_ptr=hadamard_matrix,
+        amax_ptr=amax,
         output_ptr=output,
         n_elements=n_elements,
-        hadamard_dim=hadamard_dim,
         scale_override=scale_override,
         group_size=group_size,
         seed=seed,
