@@ -32,18 +32,20 @@ def rtn_1x16s_fp4_kernel(
     x_flat = tl.load(x_ptr + offsets, mask=mask)
     
     # amax
+    scales_max = 447.99
+    val_max = 6.0 * (16 / 17) / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
         amax == 0.0,
         1.0,
-        amax / (447.99 * 6.0),
+        amax / scales_max / val_max,
     )
     
     # group
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
     
     # scale
-    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / 6.0
+    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / val_max
     s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
     s_dec_b_e4m3 = tl.where(
         s_dec_b_e4m3 == 0,
@@ -167,11 +169,13 @@ def rtn_16x16s_fp4_kernel(
     # [BLOCK_SIZE, BLOCK_SIZE]
     
     # amax
+    scales_max = 447.99
+    val_max = 6.0 * (16 / 17) / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
         amax == 0.0,
         1.0,
-        amax / (447.99 * 6.0),
+        amax / scales_max / val_max,
     )
     
     # group
@@ -184,7 +188,7 @@ def rtn_16x16s_fp4_kernel(
     )
     
     # scale
-    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / 6.0
+    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / val_max
     s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
     s_dec_b_e4m3 = tl.where(
         s_dec_b_e4m3 == 0,
@@ -315,15 +319,17 @@ def sr_1x16s_fp4_kernel(
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
     
     # amax
+    scales_max = 447.99
+    val_max = 6.0 * (16 / 17) / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
         amax == 0.0,
         1.0,
-        amax / (447.99 * 6.0),
+        amax / scales_max / val_max,
     )
     
     # scale
-    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / 6.0 / (17 / 16)
+    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / val_max
     s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
     s_dec_b_e4m3 = tl.where(
         s_dec_b_e4m3 == 0,
@@ -466,17 +472,19 @@ def eden_1x16s_fp4_kernel(
     
     # group
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
-    
+
     # amax
+    scales_max = 255.99
+    val_max = 6.0 * (16 / 17) / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
         amax == 0.0,
         1.0,
-        amax / (447.99 * 6.0),
+        amax / scales_max / val_max,
     )
     
     # scale
-    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / 6.0 / (17 / 16)
+    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / val_max
     s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
     s_dec_b_e4m3 = tl.where(
         s_dec_b_e4m3 == 0,
