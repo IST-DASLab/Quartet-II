@@ -9,7 +9,7 @@ from scipy.stats import norm
 from fast_hadamard_transform import hadamard_transform
 
 from models.quantization.quantizers.base import BaseQuantizer
-from .nvfp4_triton import rtn_1x16s_fp4_kernel_wrapper, rtn_16x16s_fp4_kernel_wrapper
+from .nvfp4_triton import rtn_1x16s_fp4_autograd, rtn_16x16s_fp4_autograd
 
 
 def rtn_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
@@ -72,12 +72,12 @@ class Nvfp4Quantizer(BaseQuantizer):
             self.hadamard_dim == 1 and
             not self.square
         ):
-            return rtn_1x16s_fp4_kernel_wrapper(x, self.scale_override, 16)
+            return rtn_1x16s_fp4_autograd.apply(x, self.scale_override, 16)
         elif (
             self.hadamard_dim == 1 and
             self.square
         ):
-            return rtn_16x16s_fp4_kernel_wrapper(x, self.scale_override, 16)
+            return rtn_16x16s_fp4_autograd.apply(x, self.scale_override, 16)
             
         
         if self.hadamard_dim != 1:

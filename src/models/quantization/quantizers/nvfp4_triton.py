@@ -121,10 +121,18 @@ def rtn_1x16s_fp4_kernel_wrapper(
     )
     return output
 
+class rtn_1x16s_fp4_autograd(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, scale_override, group_size):
+        return rtn_1x16s_fp4_kernel_wrapper(x, scale_override, group_size)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None
+
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE": 16}),
         triton.Config({"BLOCK_SIZE": 32}),
         triton.Config({"BLOCK_SIZE": 64}),
         triton.Config({"BLOCK_SIZE": 128}),
@@ -155,14 +163,13 @@ def rtn_16x16s_fp4_kernel(
     # [BLOCK_SIZE, BLOCK_SIZE]
     
     # group
-    x_grouped = tl.reshape(
-        tl.trans(
-            tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size, BLOCK_SIZE // group_size, group_size)),
-            (0, 2, 1, 3),
-        ),
+    x_grouped =  x_flat.reshape(
+        BLOCK_SIZE // group_size, group_size, BLOCK_SIZE // group_size, group_size
+    ).permute(
+        (0, 2, 1, 3),
+    ).reshape(
         (BLOCK_SIZE // group_size * BLOCK_SIZE // group_size, group_size * group_size),
     )
-    # [BLOCK_SIZE // group_size * BLOCK_SIZE // group_size, group_size * group_size]
     
     # scale
     scales = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True)
@@ -227,7 +234,7 @@ def rtn_16x16s_fp4_kernel(
     
     # Reshape back to flat form for storage
     x_dequantized_flat = tl.reshape(
-        tl.trans(
+        tl.permute(
             tl.reshape(x_dequantized, (BLOCK_SIZE // group_size, BLOCK_SIZE // group_size, group_size, group_size)),
             (0, 2, 1, 3),
         ),
@@ -260,6 +267,15 @@ def rtn_16x16s_fp4_kernel_wrapper(
         group_size=group_size,
     )
     return output
+
+class rtn_16x16s_fp4_autograd(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, scale_override, group_size):
+        return rtn_16x16s_fp4_kernel_wrapper(x, scale_override, group_size)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None
 
 
 @triton.autotune(
