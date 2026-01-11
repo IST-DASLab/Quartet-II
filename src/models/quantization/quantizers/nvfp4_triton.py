@@ -33,7 +33,7 @@ def rtn_1x16s_fp4_kernel(
     
     # amax
     scales_max = 447.99
-    val_max = 6.0 * (16 / 17) / scale_override
+    val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
         amax == 0.0,
@@ -170,7 +170,7 @@ def rtn_16x16s_fp4_kernel(
     
     # amax
     scales_max = 447.99
-    val_max = 6.0 * (16 / 17) / scale_override
+    val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
         amax == 0.0,
@@ -320,7 +320,7 @@ def sr_1x16s_fp4_kernel(
     
     # amax
     scales_max = 447.99
-    val_max = 6.0 * (16 / 17) / scale_override
+    val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
         amax == 0.0,
@@ -475,7 +475,7 @@ def eden_1x16s_fp4_kernel(
 
     # amax
     scales_max = 255.99
-    val_max = 6.0 * (16 / 17) / scale_override
+    val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
         amax == 0.0,

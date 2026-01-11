@@ -9,7 +9,7 @@ from scipy.stats import norm
 from fast_hadamard_transform import hadamard_transform
 
 from models.quantization.quantizers.base import BaseQuantizer
-from .nvfp4_triton import sr_1x16s_fp4_kernel_wrapper, eden_1x16s_fp4_kernel_wrapper
+from .nvfp4_triton import sr_1x16s_fp4_kernel_wrapper, eden_1x16s_fp4_kernel_wrapper, rtn_1x16s_fp4_kernel_wrapper
 
 
 def rtn_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
@@ -189,13 +189,19 @@ class EdenSRQuantizer(BaseQuantizer):
             self.unbiased == "eden"
         ):
             amax = torch.amax(x)
-            return eden_1x16s_fp4_kernel_wrapper(x, self.scale_override, self.group_dim, amax)
+            return eden_1x16s_fp4_kernel_wrapper(x, (17 / 16) * self.scale_override, self.group_dim, amax)
         elif (
             self.scale_dtype == "e4m3" and
             self.unbiased == "sr"
         ):
             amax = torch.amax(x)
-            return sr_1x16s_fp4_kernel_wrapper(x, self.scale_override, self.group_dim, amax)
+            return sr_1x16s_fp4_kernel_wrapper(x, (17 / 16) * self.scale_override, self.group_dim, amax)
+        elif (
+            self.scale_dtype == "e4m3" and
+            self.unbiased == "no"
+        ):
+            amax = torch.amax(x)
+            return rtn_1x16s_fp4_kernel_wrapper(x, (17 / 16) * self.scale_override, self.group_dim, amax)
 
         x_had = x.view(-1, self.group_dim)
         scales = x_had.abs().max(dim=-1, keepdim=True)[0]
