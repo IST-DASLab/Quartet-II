@@ -9,7 +9,7 @@ from scipy.stats import norm
 from fast_hadamard_transform import hadamard_transform
 
 from models.quantization.quantizers.base import BaseQuantizer
-from .nvfp4_triton import isolated_eden_sr_kernel_wrapper
+from .nvfp4_triton import sr_1x16s_fp4_kernel_wrapper, eden_1x16s_fp4_kernel_wrapper
 
 
 def rtn_fp4(x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
@@ -183,6 +183,12 @@ class EdenSRQuantizer(BaseQuantizer):
         self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
         self.grid = self.grid.to(x.device).to(x.dtype)
         
+        if (
+            self.scale_dtype == "e4m3" and
+            self.unbiased == "eden"
+        ):
+            return eden_1x16s_fp4_kernel_wrapper(x, self.hadamard_matrix, self.scale_override, self.group_dim)
+        
         x_had = F.linear(x.view(-1, self.hadamard_dim), self.hadamard_matrix).view(-1, self.group_dim)
         scales = x_had.abs().max(dim=-1, keepdim=True)[0]
         
@@ -238,7 +244,7 @@ class IsolatedEdenQuantizer(EdenSRQuantizer): # Specifically for testing backwar
             self.scale_dtype == "e4m3" and
             self.unbiased == "sr"
         ):
-            return isolated_eden_sr_kernel_wrapper(
+            return sr_1x16s_fp4_kernel_wrapper(
                 x,
                 self.scale_override,
                 self.group_dim,
