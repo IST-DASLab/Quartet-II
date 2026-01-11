@@ -54,10 +54,11 @@ class Nvfp4Quantizer(BaseQuantizer):
         )
         
     def round_scales(self, scales):            
-        s_enc = 447.99 * 6.0 / scales.max()
-        s_dec = 1 / s_enc
+        s_dec = scales.max() / 447.99 * 6.0
+        s_dec[s_dec == 0] = 1.0
         s_dec_b = scales / 6.0
-        s_dec_b_e4m3 = (s_dec_b * s_enc).to(torch.float8_e4m3fn).float()
+        s_dec_b_e4m3 = (s_dec_b / s_dec).to(torch.float8_e4m3fn).float()
+        s_dec_b_e4m3[s_dec_b_e4m3 == 0] = 1.0
         s_enc_b_inv = s_dec_b_e4m3 * s_dec
         return s_enc_b_inv
 
