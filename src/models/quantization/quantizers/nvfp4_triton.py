@@ -124,6 +124,146 @@ def rtn_1x16s_fp4_kernel_wrapper(
 
 @triton.autotune(
     configs=[
+        triton.Config({"BLOCK_SIZE": 16}),
+        triton.Config({"BLOCK_SIZE": 32}),
+        triton.Config({"BLOCK_SIZE": 64}),
+        triton.Config({"BLOCK_SIZE": 128}),
+    ],
+    key=[],
+)
+@triton.jit
+def rtn_16x16s_fp4_kernel(
+    x_ptr,
+    output_ptr,
+    n_row: tl.constexpr,
+    n_col: tl.constexpr,
+    scale_override: tl.constexpr,
+    group_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):        
+    # load x
+    pidx = tl.program_id(0)
+    pidy = tl.program_id(1)
+    start_idx = pidx * BLOCK_SIZE
+    start_idy = pidy * BLOCK_SIZE
+    offsets = (
+        (start_idx + tl.arange(0, BLOCK_SIZE))[:, None] * n_col +
+        (start_idy + tl.arange(0, BLOCK_SIZE))[None, :]
+    )
+    mask = offsets < n_row * n_col
+    x_flat = tl.load(x_ptr + offsets, mask=mask)
+    # [BLOCK_SIZE, BLOCK_SIZE]
+    
+    # group
+    x_grouped = tl.reshape(
+        tl.trans(
+            tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size, BLOCK_SIZE // group_size, group_size)),
+            (0, 2, 1, 3),
+        ),
+        (BLOCK_SIZE // group_size * BLOCK_SIZE // group_size, group_size * group_size),
+    )
+    # [BLOCK_SIZE // group_size * BLOCK_SIZE // group_size, group_size * group_size]
+    
+    # scale
+    scales = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True)
+    global_scale = tl.max(scales) / 447.99
+    global_scale = tl.where(
+        global_scale == 0,
+        1.0,
+        global_scale,
+    )
+    scales = scales / global_scale
+    scales = scales.to(tl.float8e4nv).to(tl.float32)
+    scales = tl.where(
+        scales == 0,
+        1.0,
+        scales,
+    )
+    global_scale = global_scale / 6.0 * scale_override
+    
+    x_scaled = x_grouped / scales / global_scale
+    
+    # quantize
+    x_scaled_abs = tl.abs(x_scaled)
+    x_scaled_sign = tl.where(
+        x_scaled > 0,
+        1,
+        -1,
+    )
+    x_fp4_abs = tl.where(
+        x_scaled_abs >= 5,
+        6,
+        tl.where(
+            x_scaled_abs >= 3.5,
+            4,
+            tl.where(
+                x_scaled_abs >= 2.5,
+                3,
+                tl.where(
+                    x_scaled_abs >= 1.75,
+                    2,
+                    tl.where(
+                        x_scaled_abs >= 1.25,
+                        1.5,
+                        tl.where(
+                            x_scaled_abs > 0.75,
+                            1,
+                            tl.where(
+                                x_scaled_abs > 0.25,
+                                0.5,
+                                0.0,
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+    x_fp4 = x_fp4_abs * x_scaled_sign
+
+    # dequantize
+    x_dequantized = x_fp4 * scales * global_scale
+    # [BLOCK_SIZE // group_size * BLOCK_SIZE // group_size, group_size * group_size]
+    
+    # Reshape back to flat form for storage
+    x_dequantized_flat = tl.reshape(
+        tl.trans(
+            tl.reshape(x_dequantized, (BLOCK_SIZE // group_size, BLOCK_SIZE // group_size, group_size, group_size)),
+            (0, 2, 1, 3),
+        ),
+        (BLOCK_SIZE, BLOCK_SIZE),
+    )
+    # store
+    tl.store(output_ptr + offsets, x_dequantized_flat, mask=mask)
+
+
+@torch.compiler.disable()
+def rtn_16x16s_fp4_kernel_wrapper(
+    x,
+    scale_override: float,
+    group_size: int,
+):
+    assert x.dim() == 2
+    x = x.contiguous()
+    output = torch.empty_like(x)
+    
+    n_row = x.size(0)
+    n_col = x.size(1)
+    grid = lambda meta: (triton.cdiv(n_row, meta["BLOCK_SIZE"]),triton.cdiv(n_col, meta["BLOCK_SIZE"]))
+    
+    rtn_16x16s_fp4_kernel[grid](
+        x_ptr=x,
+        output_ptr=output,
+        n_row=n_row,
+        n_col=n_col,
+        scale_override=scale_override,
+        group_size=group_size,
+    )
+    return output
+
+
+@triton.autotune(
+    configs=[
         triton.Config({"BLOCK_SIZE": 64 * 32}),
         triton.Config({"BLOCK_SIZE": 128 * 32}),
         triton.Config({"BLOCK_SIZE": 256 * 32}),
