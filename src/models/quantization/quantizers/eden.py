@@ -183,27 +183,27 @@ class EdenSRQuantizer(BaseQuantizer):
         self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
         self.grid = self.grid.to(x.device).to(x.dtype)
         
-        x = F.linear(x.view(-1, self.hadamard_dim), self.hadamard_matrix)
+        x_had = F.linear(x.view(-1, self.hadamard_dim), self.hadamard_matrix).view_as(x)
         if (
             self.scale_dtype == "e4m3" and
             self.unbiased == "eden"
         ):
-            amax = torch.amax(x)
-            return eden_1x16s_fp4_kernel_wrapper(x, (17 / 16) * self.scale_override, self.group_dim, amax)
+            amax = torch.amax(x_had)
+            return eden_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim, amax)
         elif (
             self.scale_dtype == "e4m3" and
             self.unbiased == "sr"
         ):
-            amax = torch.amax(x)
-            return sr_1x16s_fp4_kernel_wrapper(x, (17 / 16) * self.scale_override, self.group_dim, amax)
+            amax = torch.amax(x_had)
+            return sr_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim, amax)
         elif (
             self.scale_dtype == "e4m3" and
             self.unbiased == "no"
         ):
-            amax = torch.amax(x)
-            return rtn_1x16s_fp4_kernel_wrapper(x, (17 / 16) * self.scale_override, self.group_dim, amax)
+            amax = torch.amax(x_had)
+            return rtn_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim, amax)
 
-        x_had = x.view(-1, self.group_dim)
+        x_had = x_had.view(-1, self.group_dim)
         scales = x_had.abs().max(dim=-1, keepdim=True)[0]
         
         scales, global_scale = self.round_scales(scales)

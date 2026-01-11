@@ -589,6 +589,7 @@ def eden_1x16s_fp4_kernel(
 def eden_1x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
+    hadamard_dim: int,
     group_size: int,
     amax,
 ):
@@ -604,6 +605,7 @@ def eden_1x16s_fp4_kernel_wrapper(
         amax_ptr=amax,
         output_ptr=output,
         n_elements=n_elements,
+        hadamard_dim=hadamard_dim,
         scale_override=scale_override,
         group_size=group_size,
         seed=seed,
