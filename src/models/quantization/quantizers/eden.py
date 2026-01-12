@@ -144,22 +144,30 @@ class EdenSRQuantizer(BaseQuantizer):
             f"rerotate={self.rerotate})"
         )
         
-    def round_scales(self, scales: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+    def round_scales(self, scales: torch.Tensor, unbiased: str) -> (torch.Tensor, torch.Tensor):
         if self.scale_dtype == "fp32":
             return scales, torch.tensor([1.0 / 6.0 * self.scale_override], device=scales.device, dtype=scales.dtype)
         elif self.scale_dtype == "e4m3":
-            global_scale = scales.max() / 256.0
-            global_scale[global_scale == 0] = 1.0
-            scales = scales / global_scale
-            scales = scales.to(torch.float8_e4m3fn).float()
-            scales[scales == 0] = 1.0
-            return scales, global_scale / 6.0 * (17 / 16) * self.scale_override
-            # s_dec = scales.max() / 447.99 * 6.0
-            # s_dec[s_dec == 0] = 1.0
-            # s_dec_b = scales / 6.0
-            # s_dec_b_e4m3 = (s_dec_b / s_dec).to(torch.float8_e4m3fn).float()
-            # s_dec_b_e4m3[s_dec_b_e4m3 == 0] = 1.0
-            # return s_dec_b_e4m3, s_dec * self.scale_override
+            if unbiased == "eden":
+                scales_max = 255.99
+            else:
+                scales_max = 447.99
+            val_max = 6.0 / self.scale_override
+            amax = scales.max()
+            s_dec = torch.where(
+                amax == 0.0,
+                1.0,
+                amax / scales_max / val_max,
+            )
+            
+            s_dec_b = scales / val_max
+            s_dec_b_e4m3 = (s_dec_b / s_dec).to(torch.float8_e4m3fn).float()
+            s_dec_b_e4m3 = torch.where(
+                s_dec_b_e4m3 == 0,
+                1.0,
+                s_dec_b_e4m3,
+            )
+            return s_dec_b_e4m3, s_dec
         elif self.scale_dtype == "e8m0":
             scales = 2 ** (torch.floor(torch.log2(scales)))
             return scales, torch.tensor([1 / 3.0 * self.scale_override], device=scales.device, dtype=scales.dtype)
@@ -206,7 +214,7 @@ class EdenSRQuantizer(BaseQuantizer):
         x_had = x_had.view(-1, self.group_dim)
         scales = x_had.abs().max(dim=-1, keepdim=True)[0]
         
-        scales, global_scale = self.round_scales(scales)
+        scales, global_scale = self.round_scales(scales, self.unbiased)
         
         x_scaled = x_had / scales / global_scale
         if self.unbiased == "no":
@@ -288,7 +296,7 @@ class IsolatedEdenQuantizer(EdenSRQuantizer): # Specifically for testing backwar
         else:
             scales = x_had.abs().max(dim=-1, keepdim=True)[0]
             
-            scales, global_scale = self.round_scales(scales)
+            scales, global_scale = self.round_scales(scales, self.unbiased)
             
             x_scaled = x_had / scales / global_scale
             if self.unbiased == "no":
