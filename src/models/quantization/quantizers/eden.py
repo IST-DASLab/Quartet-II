@@ -258,10 +258,12 @@ class IsolatedEdenQuantizer(EdenSRQuantizer): # Specifically for testing backwar
             self.scale_dtype == "e4m3" and
             self.unbiased == "sr"
         ):
+            amax = torch.amax(x)
             return sr_1x16s_fp4_kernel_wrapper(
                 x,
-                self.scale_override,
+                (17 / 16) * self.scale_override,
                 self.group_dim,
+                amax,
             )
         
         self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
@@ -270,32 +272,47 @@ class IsolatedEdenQuantizer(EdenSRQuantizer): # Specifically for testing backwar
         x_had = (
             self.hadamard_matrix @ x.reshape(self.hadamard_dim, -1)
         ).reshape(-1, self.group_dim)
-        scales = x_had.abs().max(dim=-1, keepdim=True)[0]
         
-        scales, global_scale = self.round_scales(scales)
-        
-        x_scaled = x_had / scales / global_scale
-        if self.unbiased == "no":
-            x_fp4 = rtn_fp4(x_scaled, self.grid)
-        elif self.unbiased == "sr":
-            x_fp4 = sr_fp4(x_scaled, self.grid)
-        elif self.unbiased == "eden":
-            x_fp4 = rtn_fp4(x_scaled, self.grid)
-            
-            x_fp4 = x_fp4.view(-1, self.hadamard_dim)
-            x_scaled = x_scaled.view(-1, self.hadamard_dim)
-            
-            num = (x_scaled * x_scaled).sum(dim=-1, keepdim=True)
-            denom = (x_scaled * x_fp4).sum(dim=-1, keepdim=True)
-            correction = num / denom
-            correction = torch.where(correction.isnan(), 1.0, correction)
-            
-            scales = self.apply_correction(scales, correction)
-            
-            x_fp4 = x_fp4.view(-1, self.group_dim)
+        if (
+            self.scale_dtype == "e4m3" and
+            self.unbiased == "eden"
+        ):
+            amax = torch.amax(x_had)
+            x_dq = eden_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim, amax)
+        elif (
+            self.scale_dtype == "e4m3" and
+            self.unbiased == "no"
+        ):
+            amax = torch.amax(x_had)
+            x_dq = rtn_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim, amax)
         else:
-            raise ValueError(f"Unsupported unbiased method: {self.unbiased}")
+            scales = x_had.abs().max(dim=-1, keepdim=True)[0]
+            
+            scales, global_scale = self.round_scales(scales)
+            
+            x_scaled = x_had / scales / global_scale
+            if self.unbiased == "no":
+                x_fp4 = rtn_fp4(x_scaled, self.grid)
+            elif self.unbiased == "sr":
+                x_fp4 = sr_fp4(x_scaled, self.grid)
+            elif self.unbiased == "eden":
+                x_fp4 = rtn_fp4(x_scaled, self.grid)
+                
+                x_fp4 = x_fp4.view(-1, self.hadamard_dim)
+                x_scaled = x_scaled.view(-1, self.hadamard_dim)
+                
+                num = (x_scaled * x_scaled).sum(dim=-1, keepdim=True)
+                denom = (x_scaled * x_fp4).sum(dim=-1, keepdim=True)
+                correction = num / denom
+                correction = torch.where(correction.isnan(), 1.0, correction)
+                
+                scales = self.apply_correction(scales, correction)
+                
+                x_fp4 = x_fp4.view(-1, self.group_dim)
+            else:
+                raise ValueError(f"Unsupported unbiased method: {self.unbiased}")
+            x_dq = x_fp4 * scales * global_scale
 
         return (
-            self.hadamard_matrix.T @ (x_fp4 * scales * global_scale).reshape(self.hadamard_dim, -1)
+            self.hadamard_matrix.T @ x_dq.reshape(self.hadamard_dim, -1)
         ).reshape_as(x)
