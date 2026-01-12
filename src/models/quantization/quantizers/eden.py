@@ -152,7 +152,7 @@ class EdenSRQuantizer(BaseQuantizer):
                 scales_max = 255.99
             else:
                 scales_max = 447.99
-            val_max = 6.0 / self.scale_override
+            val_max = 6.0 / self.scale_override * (16 / 17)
             amax = scales.max()
             s_dec = torch.where(
                 amax == 0.0,
