@@ -474,7 +474,7 @@ def eden_1x16s_fp4_kernel(
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
 
     # amax
-    scales_max = 255.99
+    scales_max = 255.99 # Not 448 because eden needs space to rescale up a bit sometimes after the correction
     val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
     s_dec = tl.where(
