@@ -72,14 +72,12 @@ class Nvfp4Quantizer(BaseQuantizer):
             self.hadamard_dim == 1 and
             not self.square
         ):
-            amax = torch.amax(x)
-            return rtn_1x16s_fp4_autograd.apply(x, self.scale_override, 16, amax)
+            return rtn_1x16s_fp4_autograd.apply(x, self.scale_override, 16)
         elif (
             self.hadamard_dim == 1 and
             self.square
         ):
-            amax = torch.amax(x)
-            return rtn_16x16s_fp4_autograd.apply(x, self.scale_override, 16, amax)
+            return rtn_16x16s_fp4_autograd.apply(x, self.scale_override, 16)
             
         
         if self.hadamard_dim != 1:

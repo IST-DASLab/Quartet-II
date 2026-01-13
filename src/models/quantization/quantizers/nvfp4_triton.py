@@ -108,7 +108,6 @@ def rtn_1x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
-    amax: torch.Tensor,
 ):
     x = x.contiguous()
     output = torch.empty_like(x)
@@ -118,7 +117,7 @@ def rtn_1x16s_fp4_kernel_wrapper(
     
     rtn_1x16s_fp4_kernel[grid](
         x_ptr=x,
-        amax_ptr=amax,
+        amax_ptr=x.amax(),
         output_ptr=output,
         n_elements=n_elements,
         scale_override=scale_override,
@@ -128,8 +127,8 @@ def rtn_1x16s_fp4_kernel_wrapper(
 
 class rtn_1x16s_fp4_autograd(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale_override, group_size, amax):
-        return rtn_1x16s_fp4_kernel_wrapper(x, scale_override, group_size, amax)
+    def forward(ctx, x, scale_override, group_size):
+        return rtn_1x16s_fp4_kernel_wrapper(x, scale_override, group_size)
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -257,7 +256,6 @@ def rtn_16x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
-    amax,
 ):
     assert x.dim() == 2
     x = x.contiguous()
@@ -269,7 +267,7 @@ def rtn_16x16s_fp4_kernel_wrapper(
     
     rtn_16x16s_fp4_kernel[grid](
         x_ptr=x,
-        amax_ptr=amax,
+        amax_ptr=x.amax(),
         output_ptr=output,
         n_row=n_row,
         n_col=n_col,
@@ -280,8 +278,8 @@ def rtn_16x16s_fp4_kernel_wrapper(
 
 class rtn_16x16s_fp4_autograd(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale_override, group_size, amax):
-        return rtn_16x16s_fp4_kernel_wrapper(x, scale_override, group_size, amax)
+    def forward(ctx, x, scale_override, group_size):
+        return rtn_16x16s_fp4_kernel_wrapper(x, scale_override, group_size)
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -421,7 +419,6 @@ def sr_1x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
-    amax,
 ):
     x = x.contiguous()
     output = torch.empty_like(x)
@@ -432,7 +429,7 @@ def sr_1x16s_fp4_kernel_wrapper(
     
     sr_1x16s_fp4_kernel[grid](
         x_ptr=x,
-        amax_ptr=amax,
+        amax_ptr=x.amax(),
         output_ptr=output,
         n_elements=n_elements,
         scale_override=scale_override,
@@ -591,7 +588,6 @@ def eden_1x16s_fp4_kernel_wrapper(
     scale_override: float,
     hadamard_dim: int,
     group_size: int,
-    amax,
 ):
     x = x.contiguous()
     output = torch.empty_like(x)
@@ -602,7 +598,7 @@ def eden_1x16s_fp4_kernel_wrapper(
     
     eden_1x16s_fp4_kernel[grid](
         x_ptr=x,
-        amax_ptr=amax,
+        amax_ptr=x.amax(),
         output_ptr=output,
         n_elements=n_elements,
         hadamard_dim=hadamard_dim,

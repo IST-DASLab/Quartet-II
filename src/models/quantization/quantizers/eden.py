@@ -196,14 +196,12 @@ class EdenSRQuantizer(BaseQuantizer):
             self.scale_dtype == "e4m3" and
             self.unbiased == "eden"
         ):
-            amax = torch.amax(x_had)
-            return eden_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim, amax)
+            return eden_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim)
         elif (
             self.scale_dtype == "e4m3" and
             self.unbiased == "sr"
         ):
-            amax = torch.amax(x_had)
-            return sr_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim, amax)
+            return sr_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim)
         elif (
             self.scale_dtype == "e4m3" and
             self.unbiased == "no"
@@ -266,12 +264,10 @@ class IsolatedEdenQuantizer(EdenSRQuantizer): # Specifically for testing backwar
             self.scale_dtype == "e4m3" and
             self.unbiased == "sr"
         ):
-            amax = torch.amax(x)
             return sr_1x16s_fp4_kernel_wrapper(
                 x,
                 (17 / 16) * self.scale_override,
                 self.group_dim,
-                amax,
             )
         
         self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
@@ -285,14 +281,12 @@ class IsolatedEdenQuantizer(EdenSRQuantizer): # Specifically for testing backwar
             self.scale_dtype == "e4m3" and
             self.unbiased == "eden"
         ):
-            amax = torch.amax(x_had)
-            x_dq = eden_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim, amax)
+            x_dq = eden_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim)
         elif (
             self.scale_dtype == "e4m3" and
             self.unbiased == "no"
         ):
-            amax = torch.amax(x_had)
-            x_dq = rtn_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim, amax)
+            x_dq = rtn_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim)
         else:
             scales = x_had.abs().max(dim=-1, keepdim=True)[0]
             
