@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 
-from .quantizers import NoQuantizer
+from .quantizers import NoQuantizer, IsolatedEdenQuantizer
 
 # ===== EW_EtX =====
 class EW_EtX_Scheme(nn.Module):
@@ -172,9 +172,10 @@ class EW_QEtQXtt_Scheme(QEW_QEtX_Scheme):
 # ===== Q(E)W_Q(Et)Q(Xt)t =====
 class QEW_QEtQXttFn(Function):
     @staticmethod
-    def forward(ctx, x, w, g_quantizer):
+    def forward(ctx, x, w, g_quantizer, isolated_quantizer):
         ctx.save_for_backward(x, w)
         ctx.g_quantizer = g_quantizer
+        ctx.isolated_quantizer = isolated_quantizer
         return F.linear(x, w, None)
     
     @torch.compile
@@ -183,9 +184,10 @@ class QEW_QEtQXttFn(Function):
         x, w = ctx.saved_tensors
 
         ctx.g_quantizer.re_randomize()
+        ctx.isolated_quantizer.re_randomize()
         
         grad_x = F.linear(
-            ctx.g_quantizer(e),
+            ctx.isolated_quantizer(e),
             w.T,
             None,
         ) # Q(E)W
@@ -198,15 +200,20 @@ class QEW_QEtQXttFn(Function):
             ctx.g_quantizer(x.reshape(batch_seq_dim, -1).T.contiguous()),
         ) # Q(Et)Q(Xt)t
 
-        return grad_x, grad_w, None
+        return grad_x, grad_w, None, None
 
 
 class QEW_QEtQXtt_Scheme(QEW_QEtX_Scheme):
-    def __init__(self):
+    def __init__(self, isolated_quantizer_kwargs=None):
         super().__init__()
+        
+        if isolated_quantizer_kwargs is None:
+            isolated_quantizer_kwargs = {}
+            
+        self.isolated_quantizer = IsolatedEdenQuantizer(**isolated_quantizer_kwargs)
 
     def forward(self, x, w):
-        return QEW_QEtQXttFn.apply(x, w, self.g_quantizer)
+        return QEW_QEtQXttFn.apply(x, w, self.g_quantizer, self.isolated_quantizer)
 
 
 # ===== Q(E)Q(Wt)t_Q(Et)Q(Xt)t =====
