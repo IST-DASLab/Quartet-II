@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from models.base import CausalSelfAttention, GPTBase
 
-from .quantization import QuantizedLinear, QUANTIZER_CLASSES, BACKWARD_SCHEMES
+from .quantization import build_quantized_linear
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -86,27 +86,17 @@ class LlamaMLP(nn.Module):
         )
         self.hidden_dim = hidden_dim
 
-        self.w12 = QuantizedLinear(
+        self.w12 = build_quantized_linear(
             config.n_embd,
             hidden_dim * 2,
             bias=False,
-            weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
-            activation_quantizer=QUANTIZER_CLASSES[config.a_quant](
-                **config.a_quant_kwargs
-            ),
-            gradient_quantizer=QUANTIZER_CLASSES[config.g_quant](**config.g_quant_kwargs),
-            backward_scheme=BACKWARD_SCHEMES[config.backward_scheme](**config.backward_scheme_kwargs),
+            config=config,
         )
-        self.c_proj = QuantizedLinear(
+        self.c_proj = build_quantized_linear(
             hidden_dim,
             config.n_embd,
             bias=False,
-            weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
-            activation_quantizer=QUANTIZER_CLASSES[config.a_quant](
-                **config.a_quant_kwargs
-            ),
-            gradient_quantizer=QUANTIZER_CLASSES[config.g_quant](**config.g_quant_kwargs),
-            backward_scheme=BACKWARD_SCHEMES[config.backward_scheme](**config.backward_scheme_kwargs),
+            config=config,
         )
 
     def forward(self, x):

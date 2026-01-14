@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from .quantization import QuantizedLinear, QUANTIZER_CLASSES, BACKWARD_SCHEMES
+from .quantization import build_quantized_linear, QuantizedLinear, Quartet_II_Linear
 
 
 class LayerNorm(nn.Module):
@@ -34,28 +34,18 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = QuantizedLinear(
+        self.c_attn = build_quantized_linear(
             config.n_embd,
             3 * config.n_embd,
             bias=config.bias,
-            weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
-            activation_quantizer=QUANTIZER_CLASSES[config.a_quant](
-                **config.a_quant_kwargs
-            ),
-            gradient_quantizer=QUANTIZER_CLASSES[config.g_quant](**config.g_quant_kwargs),
-            backward_scheme=BACKWARD_SCHEMES[config.backward_scheme](**config.backward_scheme_kwargs),
+            config=config,
         )
         # output projection
-        self.c_proj = QuantizedLinear(
+        self.c_proj = build_quantized_linear(
             config.n_embd,
             config.n_embd,
             bias=config.bias,
-            weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
-            activation_quantizer=QUANTIZER_CLASSES[config.a_quant](
-                **config.a_quant_kwargs
-            ),
-            gradient_quantizer=QUANTIZER_CLASSES[config.g_quant](**config.g_quant_kwargs),
-            backward_scheme=BACKWARD_SCHEMES[config.backward_scheme](**config.backward_scheme_kwargs),
+            config=config,
         )
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -121,25 +111,17 @@ class MLP(nn.Module):
         super().__init__()
         self.dim_exp_factor = exp_factor * 4
 
-        self.c_fc = QuantizedLinear(
+        self.c_fc = build_quantized_linear(
             config.n_embd,
             int(self.dim_exp_factor * config.n_embd),
             bias=config.bias,
-            weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
-            activation_quantizer=QUANTIZER_CLASSES[config.a_quant](
-                **config.a_quant_kwargs
-            ),
-            gradient_quantizer=QUANTIZER_CLASSES[config.g_quant](**config.g_quant_kwargs),
-            backward_scheme=BACKWARD_SCHEMES[config.backward_scheme](**config.backward_scheme_kwargs),
+            config=config,
         )
-        self.c_proj = QuantizedLinear(
-            int(self.dim_exp_factor * config.n_embd), config.n_embd, bias=config.bias,
-            weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
-            activation_quantizer=QUANTIZER_CLASSES[config.a_quant](
-                **config.a_quant_kwargs
-            ),
-            gradient_quantizer=QUANTIZER_CLASSES[config.g_quant](**config.g_quant_kwargs),
-            backward_scheme=BACKWARD_SCHEMES[config.backward_scheme](**config.backward_scheme_kwargs),
+        self.c_proj = build_quantized_linear(
+            int(self.dim_exp_factor * config.n_embd),
+            config.n_embd,
+            bias=config.bias,
+            config=config,
         )
         self.dropout = nn.Dropout(config.dropout)
         self.activation = nn.GELU()
@@ -324,6 +306,7 @@ class GPTBase(nn.Module):
         whitelist_weight_modules = (
             torch.nn.Linear,
             QuantizedLinear,
+            Quartet_II_Linear,
         )
         # need to do import here to avoid circular import (since llama imports from base here)
         from .utils import BLACKLIST_WEIGHT_MODULES

@@ -213,5 +213,10 @@ def parse_args(base_parser, args, namespace):
     )
     parser.add_argument("--backward-scheme", type=str, default="EW_EtX", choices=BACKWARD_SCHEMES.keys())
     parser.add_argument("--backward-scheme-kwargs", type=json.loads, default="{}")
+    
+    # Special quantization
+    parser.add_argument("--special-scheme", type=str, default=None, choices=[None, "quartet_v2"])
+    parser.add_argument("--special-scheme-kwargs", type=json.loads, default="{}")
+    
 
     return parser.parse_args(args, namespace)
