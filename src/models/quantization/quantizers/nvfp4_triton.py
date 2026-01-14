@@ -29,7 +29,7 @@ def rtn_1x16s_fp4_kernel(
     start_idx = pid * BLOCK_SIZE
     offsets = start_idx + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
-    x_flat = tl.load(x_ptr + offsets, mask=mask)
+    x_flat = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     
     # amax
     scales_max = 447.99

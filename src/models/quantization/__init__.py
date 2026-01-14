@@ -6,7 +6,7 @@ from torch.autograd import Function
 
 from .backward import EW_EtX_Scheme, BACKWARD_SCHEMES
 from .quantizers import NoQuantizer, QUANTIZER_CLASSES
-from .schemes import Quartet_II_Linear
+from .schemes import Quartet_II_Linear, NvidiaLinear
 
 
 def build_quantized_linear(
@@ -15,7 +15,6 @@ def build_quantized_linear(
     bias: bool,
     config,
 ) -> nn.Linear:
-    # Special handling for quartet_v2 scheme
     if config.special_scheme == "quartet_v2":
         return Quartet_II_Linear(
             in_dim,
@@ -23,19 +22,27 @@ def build_quantized_linear(
             bias=False,
             **config.special_scheme_kwargs,
         )
-    
-    # Base creation
-    return QuantizedLinear(
-        in_dim,
-        out_dim,
-        bias=bias,
-        weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
-        activation_quantizer=QUANTIZER_CLASSES[config.a_quant](
-            **config.a_quant_kwargs
-        ),
-        gradient_quantizer=QUANTIZER_CLASSES[config.g_quant](**config.g_quant_kwargs),
-        backward_scheme=BACKWARD_SCHEMES[config.backward_scheme](**config.backward_scheme_kwargs),
-    )
+    elif config.special_scheme == "nvidia":
+        return NvidiaLinear(
+            in_dim,
+            out_dim,
+            bias=False,
+            **config.special_scheme_kwargs,
+        )
+    elif config.special_scheme is None:
+        return QuantizedLinear(
+            in_dim,
+            out_dim,
+            bias=bias,
+            weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
+            activation_quantizer=QUANTIZER_CLASSES[config.a_quant](
+                **config.a_quant_kwargs
+            ),
+            gradient_quantizer=QUANTIZER_CLASSES[config.g_quant](**config.g_quant_kwargs),
+            backward_scheme=BACKWARD_SCHEMES[config.backward_scheme](**config.backward_scheme_kwargs),
+        )
+    else:
+        raise ValueError(f"Unknown special scheme {config.special_scheme}")
 
 
 class QuantizedLinear(nn.Linear):

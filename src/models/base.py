@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from .quantization import build_quantized_linear, QuantizedLinear, Quartet_II_Linear
+from .quantization import build_quantized_linear, QuantizedLinear, Quartet_II_Linear, NvidiaLinear
 
 
 class LayerNorm(nn.Module):
@@ -307,6 +307,7 @@ class GPTBase(nn.Module):
             torch.nn.Linear,
             QuantizedLinear,
             Quartet_II_Linear,
+            NvidiaLinear,
         )
         # need to do import here to avoid circular import (since llama imports from base here)
         from .utils import BLACKLIST_WEIGHT_MODULES
