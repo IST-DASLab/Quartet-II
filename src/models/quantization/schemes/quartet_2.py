@@ -304,11 +304,11 @@ class Quartet_II_fn(torch.autograd.Function):
         
         # EW
         if ctx.amax_storage.e_ht_amax is None or not ctx.delayed_amax:
-            ctx.amax_storage.e_ht_amax = (grad_output.reshape(-1, Quartet_II_fn.hadamard_matrix.size(0)) @ Quartet_II_fn.hadamard_matrix.T).amax().float()
+            ctx.amax_storage.e_ht_amax = (grad_output.reshape(-1, Quartet_II_fn.hadamard_matrix.size(0)) @ Quartet_II_fn.hadamard_matrix.T).abs().max().float()
         e_ht_fp4, ctx.amax_storage.e_ht_amax = eden_1x16s_fp4_kernel_wrapper(grad_output, Quartet_II_fn.hadamard_matrix.to(grad_output.dtype), Quartet_II_fn.backward_scale_override, 16, ctx.amax_storage.e_ht_amax)
         
         if ctx.amax_storage.weght_tht_amax is None or not ctx.delayed_amax:
-            ctx.amax_storage.weght_tht_amax = (weight_fp4.T.reshape(-1, Quartet_II_fn.hadamard_matrix.size(0)) @ Quartet_II_fn.hadamard_matrix.T).amax().float()
+            ctx.amax_storage.weght_tht_amax = (weight_fp4.T.reshape(-1, Quartet_II_fn.hadamard_matrix.size(0)) @ Quartet_II_fn.hadamard_matrix.T).abs().max().float()
         weight_tht_fp4, ctx.amax_storage.weght_tht_amax = eden_1x16s_fp4_kernel_wrapper(weight_fp4.T, Quartet_II_fn.hadamard_matrix.to(weight_fp4.dtype), Quartet_II_fn.backward_scale_override, 16, ctx.amax_storage.weght_tht_amax)
         
         grad_input = F.linear(
@@ -319,11 +319,11 @@ class Quartet_II_fn(torch.autograd.Function):
 
         # EtX
         if ctx.amax_storage.e_tht_amax is None or not ctx.delayed_amax:
-            ctx.amax_storage.e_tht_amax = (grad_output.T.reshape(-1, Quartet_II_fn.hadamard_matrix.size(0)) @ Quartet_II_fn.hadamard_matrix.T).amax().float()
+            ctx.amax_storage.e_tht_amax = (grad_output.T.reshape(-1, Quartet_II_fn.hadamard_matrix.size(0)) @ Quartet_II_fn.hadamard_matrix.T).abs().max().float()
         e_tht_fp4, ctx.amax_storage.e_tht_amax = eden_1x16s_fp4_kernel_wrapper(grad_output.T, Quartet_II_fn.hadamard_matrix.to(grad_output.dtype), Quartet_II_fn.backward_scale_override, Quartet_II_fn.group_size, ctx.amax_storage.e_tht_amax)
         
         if ctx.amax_storage.input_tht_amax is None or not ctx.delayed_amax:
-            ctx.amax_storage.input_tht_amax = (input_fp4.T.reshape(-1, Quartet_II_fn.hadamard_matrix.size(0)) @ Quartet_II_fn.hadamard_matrix.T).amax().float()
+            ctx.amax_storage.input_tht_amax = (input_fp4.T.reshape(-1, Quartet_II_fn.hadamard_matrix.size(0)) @ Quartet_II_fn.hadamard_matrix.T).abs().max().float()
         input_tht_fp4, ctx.amax_storage.input_tht_amax = eden_1x16s_fp4_kernel_wrapper(input_fp4.T, Quartet_II_fn.hadamard_matrix.to(input_fp4.dtype), Quartet_II_fn.backward_scale_override, Quartet_II_fn.group_size, ctx.amax_storage.input_tht_amax)
         
         grad_weight = F.linear(

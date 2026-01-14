@@ -117,7 +117,7 @@ def rtn_1x16s_fp4_kernel_wrapper(
     
     rtn_1x16s_fp4_kernel[grid](
         x_ptr=x,
-        amax_ptr=x.amax(),
+        amax_ptr=x.abs().max(),
         output_ptr=output,
         n_elements=n_elements,
         scale_override=scale_override,
@@ -267,7 +267,7 @@ def rtn_16x16s_fp4_kernel_wrapper(
     
     rtn_16x16s_fp4_kernel[grid](
         x_ptr=x,
-        amax_ptr=x.amax(),
+        amax_ptr=x.abs().max(),
         output_ptr=output,
         n_row=n_row,
         n_col=n_col,
@@ -429,7 +429,7 @@ def sr_1x16s_fp4_kernel_wrapper(
     
     sr_1x16s_fp4_kernel[grid](
         x_ptr=x,
-        amax_ptr=x.amax(),
+        amax_ptr=x.abs().max(),
         output_ptr=output,
         n_elements=n_elements,
         scale_override=scale_override,
@@ -598,7 +598,7 @@ def eden_1x16s_fp4_kernel_wrapper(
     
     eden_1x16s_fp4_kernel[grid](
         x_ptr=x,
-        amax_ptr=x.amax(),
+        amax_ptr=x.abs().max(),
         output_ptr=output,
         n_elements=n_elements,
         hadamard_dim=hadamard_dim,
