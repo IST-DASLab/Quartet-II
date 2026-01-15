@@ -61,7 +61,7 @@ class Nvidia_fn(torch.autograd.Function):
             return grad_input, grad_weight, None, None
         
         # EW
-        e_fp4 = sr_1x16s_fp4_kernel_wrapper(grad_output, Nvidia_fn.hadamard_matrix.to(grad_output.dtype), (17 / 16), Nvidia_fn.group_size)
+        e_fp4 = sr_1x16s_fp4_kernel_wrapper(grad_output, (17 / 16), Nvidia_fn.group_size)
         
         grad_input = F.linear(
             e_fp4,
@@ -71,10 +71,10 @@ class Nvidia_fn(torch.autograd.Function):
 
         # EtX
         e_tht = (grad_output.T.reshape(-1, Nvidia_fn.hadamard_matrix.size(0)) @ Nvidia_fn.hadamard_matrix.T).reshape(ctx.out_dim, ctx.batch * ctx.seq)
-        e_tht_fp4 = sr_1x16s_fp4_kernel_wrapper(e_tht, Nvidia_fn.hadamard_matrix.to(grad_output.dtype), (17 / 16), Nvidia_fn.group_size)
+        e_tht_fp4 = sr_1x16s_fp4_kernel_wrapper(e_tht, (17 / 16), Nvidia_fn.group_size)
         
         input_tht = (input.T.reshape(-1, Nvidia_fn.hadamard_matrix.size(0)) @ Nvidia_fn.hadamard_matrix.T).reshape(ctx.in_dim, ctx.batch * ctx.seq)
-        input_tht_fp4 = rtn_1x16s_fp4_kernel_wrapper(input_tht, Nvidia_fn.hadamard_matrix.to(input.dtype), 1.0, Nvidia_fn.group_size)
+        input_tht_fp4 = rtn_1x16s_fp4_kernel_wrapper(input_tht, 1.0, Nvidia_fn.group_size)
         
         grad_weight = F.linear(
             e_tht_fp4,
