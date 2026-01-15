@@ -27,7 +27,7 @@ class Nvidia_fn(torch.autograd.Function):
             input_fp4 = input
             weight_fp4 = weight
         else:
-            input_fp4 = rtn_16x16s_fp4_kernel_wrapper(input, scale_override=1.0, group_size=Nvidia_fn.group_size)
+            input_fp4 = rtn_1x16s_fp4_kernel_wrapper(input, scale_override=1.0, group_size=Nvidia_fn.group_size)
             weight_fp4 = rtn_16x16s_fp4_kernel_wrapper(weight, scale_override=1.0, group_size=Nvidia_fn.group_size)
 
         ctx.save_for_backward(input, weight_fp4)
