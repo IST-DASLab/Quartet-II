@@ -47,7 +47,7 @@ IFS=":" read -r MODEL_SIZE_PREFIX N_LAYER N_EMBD N_HEAD LR BASE_TOKENS <<< "$CUR
 TOKENS=$(python3 -c "print(int($BASE_TOKENS * $CURRENT_MULT))")
 
 # Parse Quant Setup
-IFS=":" read -r HADAMARD_DIM DELAYED_AMAX DISABLE_FORWARD_QUANT DISABLE_BACKWARD_QUANT <<< "$CURRENT_SETUP"
+IFS=":" read -r HADAMARD_DIM DELAYED_AMAX DISABLE_FORWARD_QUANT DISABLE_BACKWARD_QUANT FOUR_OVER_SIX <<< "$CURRENT_SETUP"
 
 # ==========================================
 # 1. Static Environment Setup
@@ -77,7 +77,7 @@ export DATASET_BUFFER="/iopsstor/scratch/cscs/blacksamorez/datasets"
 
 # Special
 export SPECIAL_SCHEME="quartet_v2"
-export SPECIAL_SCHEME_KWARGS="{\"hadamard_dim\": $HADAMARD_DIM, \"delayed_amax\": $DELAYED_AMAX, \"disable_forward_quant\": ${DISABLE_FORWARD_QUANT}, \"disable_backward_quant\": ${DISABLE_BACKWARD_QUANT}}"
+export SPECIAL_SCHEME_KWARGS="{\"hadamard_dim\": $HADAMARD_DIM, \"delayed_amax\": $DELAYED_AMAX, \"disable_forward_quant\": ${DISABLE_FORWARD_QUANT}, \"disable_backward_quant\": ${DISABLE_BACKWARD_QUANT}, \"four_over_six\": ${FOUR_OVER_SIX}}"
 
 # ==========================================
 # 3. Calculation & Execution
@@ -87,7 +87,11 @@ export ITERATIONS=$((TOKENS / (BATCH_SIZE * ACC_STEPS * SEQUENCE_LENGTH)))
 export WARMUP_STEPS=$((ITERATIONS / 10))
 
 # WandB Prefix
-WANDB_PREFIX="${MODEL_SIZE_PREFIX}-TOK${TOKENS}-${SPECIAL_SCHEME}@${CURRENT_SETUP}-${DATASET}"
+SETUP_STR="${HADAMARD_DIM};${DELAYED_AMAX};${DISABLE_FORWARD_QUANT};${DISABLE_BACKWARD_QUANT}"
+if [ "${FOUR_OVER_SIX}" = "true" ]; then
+    SETUP_STR="${SETUP_STR};${FOUR_OVER_SIX}"
+fi
+WANDB_PREFIX="${MODEL_SIZE_PREFIX}-TOK${TOKENS}-${SPECIAL_SCHEME}@${SETUP_STR}-${DATASET}"
 
 echo "Launching torchrun..."
 

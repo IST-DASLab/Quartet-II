@@ -15,21 +15,18 @@ MODEL_CONFIGS=(
 
 # 2. Token Multipliers
 MULTIPLIERS=(
-    # 0.25
+    0.25
     0.5
-    # 1
-    # 2
-    # 4
-    # 8
+    1
+    2
+    4
+    8
 )
 
-# 3. Quantization Setups: "GROUP_DIM:SCALE_DTYPE:UNBIASED"
+# 3. Quantization Setups: "GROUP_DIM:SCALE_DTYPE:UNBIASED:FOUR_OVER_SIX"
 QUANT_SETUPS=(
-    # "1:true:1.00"
-    "1:false:1.00"
-    # "1:false:0.92"
-    # "16:true:1.00"
-    # "16:false:1.00"
+    "1:true:1.00:true"
+    "1:false:1.00:true"
 )
 # <<<<<<<<<
 

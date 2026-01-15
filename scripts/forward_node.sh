@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --account=infra01
-#SBATCH --time=02:00:00
+#SBATCH --account=a140
+#SBATCH --time=12:00:00
 #SBATCH --partition=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
@@ -47,7 +47,7 @@ IFS=":" read -r MODEL_SIZE_PREFIX N_LAYER N_EMBD N_HEAD LR BASE_TOKENS <<< "$CUR
 TOKENS=$(python3 -c "print(int($BASE_TOKENS * $CURRENT_MULT))")
 
 # Parse Quant Setup
-IFS=":" read -r HADAMARD_DIM SQUARE SCALE_OVERRIDE <<< "$CURRENT_SETUP"
+IFS=":" read -r HADAMARD_DIM SQUARE SCALE_OVERRIDE FOUR_OVER_SIX <<< "$CURRENT_SETUP"
 
 # ==========================================
 # 1. Static Environment Setup
@@ -57,7 +57,7 @@ echo "START TIME: $(date)"
 echo "Running on host: $(hostname)"
 echo "Job Array ID: ${SLURM_ARRAY_TASK_ID}"
 echo "Config: ${MODEL_SIZE_PREFIX} | Multiplier: ${CURRENT_MULT} | Tokens: ${TOKENS}"
-echo "Quant: Had Dim=${HADAMARD_DIM}, Square=${SQUARE}, Scale Override=${SCALE_OVERRIDE}"
+echo "Quant: Had Dim=${HADAMARD_DIM}, Square=${SQUARE}, Scale Override=${SCALE_OVERRIDE}, Four Over Six=${FOUR_OVER_SIX}"
 
 export VOCAB_SIZE=32000 
 export BATCH_SIZE=128
@@ -77,10 +77,10 @@ export DATASET_BUFFER="/iopsstor/scratch/cscs/blacksamorez/datasets"
 
 export W_QUANT="Nvfp4Quantizer"
 export W_BITS=4
-export W_QUANT_KWARGS="{\"hadamard_dim\": ${HADAMARD_DIM}, \"square\": ${SQUARE}, \"scale_override\": ${SCALE_OVERRIDE}}"
+export W_QUANT_KWARGS="{\"hadamard_dim\": ${HADAMARD_DIM}, \"square\": ${SQUARE}, \"scale_override\": ${SCALE_OVERRIDE}, \"four_over_six\": ${FOUR_OVER_SIX}}"
 export A_QUANT="Nvfp4Quantizer"
 export A_BITS=4
-export A_QUANT_KWARGS="{\"hadamard_dim\": ${HADAMARD_DIM}, \"square\": false, \"scale_override\": ${SCALE_OVERRIDE}}"
+export A_QUANT_KWARGS="{\"hadamard_dim\": ${HADAMARD_DIM}, \"square\": false, \"scale_override\": ${SCALE_OVERRIDE}, \"four_over_six\": ${FOUR_OVER_SIX}}"
 
 # ==========================================
 # 3. Calculation & Execution
@@ -91,6 +91,9 @@ export WARMUP_STEPS=$((ITERATIONS / 10))
 
 # WandB Prefix
 SETUP_STR="${HADAMARD_DIM};${SQUARE};${SCALE_OVERRIDE}"
+if [ "${FOUR_OVER_SIX}" = "true" ]; then
+    SETUP_STR="${SETUP_STR};${FOUR_OVER_SIX}"
+fi
 
 WANDB_PREFIX="${MODEL_SIZE_PREFIX}-TOK${TOKENS}-forward-${W_QUANT}@${SETUP_STR}-${DATASET}"
 
