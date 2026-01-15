@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 
+@triton.jit
 def rtn_fp4(x):
     x_abs = tl.abs(x)
     x_sign = tl.where(
@@ -44,6 +45,75 @@ def rtn_fp4(x):
     return x_fp4_abs * x_sign
 
 
+@triton.jit
+def sr_fp4(x, sampled_prob):
+    x_abs = tl.abs(x)
+    x_sign = tl.where(
+        x > 0,
+        1,
+        -1,
+    )
+    x_fp4_high = tl.where(
+        x_abs >= 4,
+        6,
+        tl.where(
+            x_abs >= 3,
+            4,
+            tl.where(
+                x_abs >= 2,
+                3,
+                tl.where(
+                    x_abs >= 1.5,
+                    2,
+                    tl.where(
+                        x_abs >= 1.0,
+                        1.5,
+                        tl.where(
+                            x_abs >= 0.5,
+                            1,
+                            0.5,
+                        )
+                    )
+                )
+            )
+        )
+    )
+    
+    x_fp4_low = tl.where(
+        x_abs > 4,
+        4,
+        tl.where(
+            x_abs > 3,
+            3,
+            tl.where(
+                x_abs > 2,
+                2,
+                tl.where(
+                    x_abs > 1.5,
+                    1.5,
+                    tl.where(
+                        x_abs > 1.0,
+                        1.0,
+                        tl.where(
+                            x_abs > 0.5,
+                            0.5,
+                            0.0,
+                        )
+                    )
+                )
+            )
+        )
+    )
+    
+    prob_up = (x_abs - x_fp4_low) / (x_fp4_high - x_fp4_low)
+    return tl.where(
+        sampled_prob < prob_up,
+        x_fp4_high,
+        x_fp4_low,
+    ) * x_sign
+
+
+@triton.jit
 def get_scales(x, amax, val_max, scales_max):
     s_dec = tl.where(
         amax == 0.0,
@@ -59,6 +129,18 @@ def get_scales(x, amax, val_max, scales_max):
         s_dec_b_e4m3,
     )
     return s_dec_b_e4m3, s_dec
+
+
+@triton.jit
+def get_alt_scales(x, val_max, s_dec):    
+    s_dec_b = tl.max(tl.abs(x), axis=-1, keep_dims=True) / val_max
+    s_dec_b_e4m3 = (s_dec_b * (6/4) / s_dec).to(tl.float8e4nv).to(tl.float32)
+    s_dec_b_e4m3 = tl.where(
+        s_dec_b_e4m3 == 0,
+        1.0,
+        s_dec_b_e4m3,
+    )
+    return s_dec_b_e4m3
 
 
 @triton.autotune(
@@ -78,6 +160,7 @@ def rtn_1x16s_fp4_kernel(
     n_elements: tl.constexpr,
     scale_override: tl.constexpr,
     group_size: tl.constexpr,
+    four_over_six: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):        
     # load x
@@ -91,7 +174,7 @@ def rtn_1x16s_fp4_kernel(
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
     
     # amax
-    scales_max = 447.99
+    scales_max = 256.00 if four_over_six else 448.00
     val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
     
@@ -102,10 +185,25 @@ def rtn_1x16s_fp4_kernel(
     x_fp4 = rtn_fp4(x_scaled)
     x_dequantized = x_fp4 * (s_dec_b_e4m3 * s_dec)
     
-    # Reshape back to flat form for storage
-    x_dequantized_flat = tl.reshape(x_dequantized, (BLOCK_SIZE,))
+    if not four_over_six:
+        best_x_dequantized = x_dequantized
+    else:
+        alt_s_dec_b_e4m3 = get_alt_scales(x_grouped, val_max, s_dec)
+        alt_x_scaled = x_grouped / (alt_s_dec_b_e4m3 * s_dec)
+        
+        alt_x_fp4 = rtn_fp4(alt_x_scaled)
+        alt_x_dequantized = alt_x_fp4 * (alt_s_dec_b_e4m3 * s_dec)
+        
+        error_six = tl.sum((x_grouped - x_dequantized) * (x_grouped - x_dequantized), axis=-1, keep_dims=True)
+        error_four = tl.sum((x_grouped - alt_x_dequantized) * (x_grouped - alt_x_dequantized), axis=-1, keep_dims=True)
+        
+        best_x_dequantized = tl.where(
+            error_six <= error_four,
+            x_dequantized,
+            alt_x_dequantized,
+        )
     
-    # store
+    x_dequantized_flat = tl.reshape(best_x_dequantized, (BLOCK_SIZE,))
     tl.store(output_ptr + offsets, x_dequantized_flat, mask=mask)
 
 
@@ -114,6 +212,7 @@ def rtn_1x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
+    four_over_six: bool,
 ):
     x = x.contiguous()
     output = torch.empty_like(x)
@@ -128,13 +227,14 @@ def rtn_1x16s_fp4_kernel_wrapper(
         n_elements=n_elements,
         scale_override=scale_override,
         group_size=group_size,
+        four_over_six=four_over_six,
     )
     return output
 
 class rtn_1x16s_fp4_autograd(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale_override, group_size):
-        return rtn_1x16s_fp4_kernel_wrapper(x, scale_override, group_size)
+    def forward(ctx, x, scale_override, group_size, four_over_six):
+        return rtn_1x16s_fp4_kernel_wrapper(x, scale_override, group_size, four_over_six)
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -158,6 +258,7 @@ def rtn_16x16s_fp4_kernel(
     n_col: tl.constexpr,
     scale_override: tl.constexpr,
     group_size: tl.constexpr,
+    four_over_six: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):        
     # load x
@@ -183,7 +284,7 @@ def rtn_16x16s_fp4_kernel(
     )
     
     # scale
-    scales_max = 447.99
+    scales_max = 256.00 if four_over_six else 447.99
     val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
     
@@ -195,15 +296,31 @@ def rtn_16x16s_fp4_kernel(
     x_dequantized = x_fp4 * (s_dec_b_e4m3 * s_dec)
     # [BLOCK_SIZE // group_size * BLOCK_SIZE // group_size, group_size * group_size]
     
-    # Reshape back to flat form for storage
+    if not four_over_six:
+        best_x_dequantized = x_dequantized
+    else:
+        alt_s_dec_b_e4m3 = get_alt_scales(x_grouped, val_max, s_dec)
+        alt_x_scaled = x_grouped / (alt_s_dec_b_e4m3 * s_dec)
+        
+        alt_x_fp4 = rtn_fp4(alt_x_scaled)
+        alt_x_dequantized = alt_x_fp4 * (alt_s_dec_b_e4m3 * s_dec)
+        
+        error_six = tl.sum((x_grouped - x_dequantized) * (x_grouped - x_dequantized), axis=-1, keep_dims=True)
+        error_four = tl.sum((x_grouped - alt_x_dequantized) * (x_grouped - alt_x_dequantized), axis=-1, keep_dims=True)
+        
+        best_x_dequantized = tl.where(
+            error_six <= error_four,
+            x_dequantized,
+            alt_x_dequantized,
+        )
+
     x_dequantized_flat = tl.reshape(
         tl.permute(
-            tl.reshape(x_dequantized, (BLOCK_SIZE // group_size, BLOCK_SIZE // group_size, group_size, group_size)),
+            tl.reshape(best_x_dequantized, (BLOCK_SIZE // group_size, BLOCK_SIZE // group_size, group_size, group_size)),
             (0, 2, 1, 3),
         ),
         (BLOCK_SIZE, BLOCK_SIZE),
     )
-    # store
     tl.store(output_ptr + offsets, x_dequantized_flat, mask=mask)
 
 
@@ -212,6 +329,7 @@ def rtn_16x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
+    four_over_six: bool,
 ):
     assert x.dim() == 2
     x = x.contiguous()
@@ -229,13 +347,14 @@ def rtn_16x16s_fp4_kernel_wrapper(
         n_col=n_col,
         scale_override=scale_override,
         group_size=group_size,
+        four_over_six=four_over_six,
     )
     return output
 
 class rtn_16x16s_fp4_autograd(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale_override, group_size):
-        return rtn_16x16s_fp4_kernel_wrapper(x, scale_override, group_size)
+    def forward(ctx, x, scale_override, group_size, four_over_six):
+        return rtn_16x16s_fp4_kernel_wrapper(x, scale_override, group_size, four_over_six)
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -259,6 +378,7 @@ def sr_1x16s_fp4_kernel(
     n_elements: tl.constexpr,
     scale_override: tl.constexpr,
     group_size: tl.constexpr,
+    four_over_six: tl.constexpr,
     seed: int,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -267,13 +387,13 @@ def sr_1x16s_fp4_kernel(
     start_idx = pid * BLOCK_SIZE
     offsets = start_idx + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
-    x_flat = tl.load(x_ptr + offsets, mask=mask)
+    x_flat = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     
     # group
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
     
     # amax
-    scales_max = 447.99
+    scales_max = 256.00 if four_over_six else 448.00
     val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
     
@@ -281,78 +401,30 @@ def sr_1x16s_fp4_kernel(
     x_scaled = x_grouped / (s_dec_b_e4m3 * s_dec)
     
     # quantize
-    x_scaled_abs = tl.abs(x_scaled)
-    x_scaled_sign = tl.where(
-        x_scaled > 0,
-        1,
-        -1,
-    )
-    x_fp4_high = tl.where(
-        x_scaled_abs >= 4,
-        6,
-        tl.where(
-            x_scaled_abs >= 3,
-            4,
-            tl.where(
-                x_scaled_abs >= 2,
-                3,
-                tl.where(
-                    x_scaled_abs >= 1.5,
-                    2,
-                    tl.where(
-                        x_scaled_abs >= 1.0,
-                        1.5,
-                        tl.where(
-                            x_scaled_abs >= 0.5,
-                            1,
-                            0.5,
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
-    x_fp4_low = tl.where(
-        x_scaled_abs > 4,
-        4,
-        tl.where(
-            x_scaled_abs > 3,
-            3,
-            tl.where(
-                x_scaled_abs > 2,
-                2,
-                tl.where(
-                    x_scaled_abs > 1.5,
-                    1.5,
-                    tl.where(
-                        x_scaled_abs > 1.0,
-                        1.0,
-                        tl.where(
-                            x_scaled_abs > 0.5,
-                            0.5,
-                            0.0,
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
-    prob_up = (x_scaled_abs - x_fp4_low) / (x_fp4_high - x_fp4_low)
     sampled_prob = tl.rand(seed, offsets).reshape(BLOCK_SIZE // group_size, group_size)
-    x_fp4 = tl.where(
-        sampled_prob < prob_up,
-        x_fp4_high,
-        x_fp4_low,
-    ) * x_scaled_sign
-
+    x_fp4 = sr_fp4(x_scaled, sampled_prob)
     x_dequantized = x_fp4 * (s_dec_b_e4m3 * s_dec)
     
-    # Reshape back to flat form for storage
-    x_dequantized_flat = tl.reshape(x_dequantized, (BLOCK_SIZE,))
-    
-    # store
+    if not four_over_six:
+        best_x_dequantized = x_dequantized
+    else:
+        alt_s_dec_b_e4m3 = get_alt_scales(x_grouped, val_max, s_dec)
+        alt_x_scaled = x_grouped / (alt_s_dec_b_e4m3 * s_dec)
+        
+        alt_sampled_prob = tl.rand(seed + 1, offsets).reshape(BLOCK_SIZE // group_size, group_size)
+        alt_x_fp4 = sr_fp4(alt_x_scaled, alt_sampled_prob)
+        alt_x_dequantized = alt_x_fp4 * (alt_s_dec_b_e4m3 * s_dec)
+        
+        error_six = tl.sum((x_grouped - x_dequantized) * (x_grouped - x_dequantized), axis=-1, keep_dims=True)
+        error_four = tl.sum((x_grouped - alt_x_dequantized) * (x_grouped - alt_x_dequantized), axis=-1, keep_dims=True)
+        
+        best_x_dequantized = tl.where(
+            error_six <= error_four,
+            x_dequantized,
+            alt_x_dequantized,
+        )
+
+    x_dequantized_flat = tl.reshape(best_x_dequantized, (BLOCK_SIZE,))
     tl.store(output_ptr + offsets, x_dequantized_flat, mask=mask)
 
 
@@ -361,6 +433,7 @@ def sr_1x16s_fp4_kernel_wrapper(
     x,
     scale_override: float,
     group_size: int,
+    four_over_six: bool,
 ):
     x = x.contiguous()
     output = torch.empty_like(x)
@@ -376,6 +449,7 @@ def sr_1x16s_fp4_kernel_wrapper(
         n_elements=n_elements,
         scale_override=scale_override,
         group_size=group_size,
+        four_over_six=four_over_six,
         seed=seed,
     )
     return output
@@ -399,6 +473,7 @@ def eden_1x16s_fp4_kernel(
     hadamard_dim: tl.constexpr,
     scale_override: tl.constexpr,
     group_size: tl.constexpr,
+    four_over_six: tl.constexpr,
     seed: int,
     BLOCK_SIZE: tl.constexpr,
 ):    
@@ -407,7 +482,7 @@ def eden_1x16s_fp4_kernel(
     start_idx = pid * BLOCK_SIZE
     offsets = start_idx + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
-    x_flat = tl.load(x_ptr + offsets, mask=mask)
+    x_flat = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     
     # group
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
@@ -423,9 +498,43 @@ def eden_1x16s_fp4_kernel(
     # quantize
     x_fp4 = rtn_fp4(x_scaled)
     
+    if not four_over_six:
+        best_x_scaled = x_scaled
+        best_x_fp4 = x_fp4
+        best_s_dec_b_e4m3 = s_dec_b_e4m3
+    else:
+        alt_s_dec_b_e4m3 = get_alt_scales(x_grouped, val_max, s_dec)
+        alt_x_scaled = x_grouped / (alt_s_dec_b_e4m3 * s_dec)
+        
+        alt_x_fp4 = rtn_fp4(alt_x_scaled)
+        
+        x_dequantized = x_fp4 * (s_dec_b_e4m3 * s_dec)
+        alt_x_dequantized = alt_x_fp4 * (alt_s_dec_b_e4m3 * s_dec)
+        
+        error_six = tl.sum((x_grouped - x_dequantized) * (x_grouped - x_dequantized), axis=-1, keep_dims=True)
+        error_four = tl.sum((x_grouped - alt_x_dequantized) * (x_grouped - alt_x_dequantized), axis=-1, keep_dims=True)
+        
+        best_x_scaled = tl.where(
+            error_six <= error_four,
+            x_scaled,
+            alt_x_scaled,
+        )
+        
+        best_x_fp4 = tl.where(
+            error_six <= error_four,
+            x_fp4,
+            alt_x_fp4,
+        )
+        
+        best_s_dec_b_e4m3 = tl.where(
+            error_six <= error_four,
+            s_dec_b_e4m3,
+            alt_s_dec_b_e4m3,
+        )
+    
     # Calculate EDEN scale
-    x_scaled = tl.reshape(x_scaled, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
-    x_fp4 = tl.reshape(x_fp4, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
+    x_scaled = tl.reshape(best_x_scaled, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
+    x_fp4 = tl.reshape(best_x_fp4, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
     
     num = tl.sum(x_scaled * x_scaled, axis=-1, keep_dims=True)
     denom = tl.sum(x_scaled * x_fp4, axis=-1, keep_dims=True)
@@ -437,7 +546,7 @@ def eden_1x16s_fp4_kernel(
     )
     
     # Apply EDEN scale
-    scales = tl.reshape(s_dec_b_e4m3, (BLOCK_SIZE // hadamard_dim, hadamard_dim // group_size))
+    scales = tl.reshape(best_s_dec_b_e4m3, (BLOCK_SIZE // hadamard_dim, hadamard_dim // group_size))
     corrected_scales = tl.reshape(scales * correction, (BLOCK_SIZE // group_size, 1))
     
     bitscales = tl.cast(corrected_scales.to(tl.float8e4nv), tl.uint8, bitcast=True)
@@ -484,6 +593,7 @@ def eden_1x16s_fp4_kernel_wrapper(
     scale_override: float,
     hadamard_dim: int,
     group_size: int,
+    four_over_six: bool,
 ):
     x = x.contiguous()
     output = torch.empty_like(x)
@@ -500,6 +610,7 @@ def eden_1x16s_fp4_kernel_wrapper(
         hadamard_dim=hadamard_dim,
         scale_override=scale_override,
         group_size=group_size,
+        four_over_six=four_over_six,
         seed=seed,
     )
     return output

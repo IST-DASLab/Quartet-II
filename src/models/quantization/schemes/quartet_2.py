@@ -256,7 +256,7 @@ class Quartet_II_fn(torch.autograd.Function):
 
     @torch.compile(dynamic=False)
     @staticmethod
-    def forward(ctx, input, weight, amax_storage: AmaxStorage, delayed_amax: bool, disable_forward_quant: bool, disable_backward_quant: bool):
+    def forward(ctx, input, weight, amax_storage: AmaxStorage, delayed_amax: bool, disable_forward_quant: bool, disable_backward_quant: bool, four_over_six: bool):
         ctx.batch = input.shape[0]
         ctx.seq = input.shape[1]
         ctx.in_dim = weight.shape[1]
@@ -269,8 +269,8 @@ class Quartet_II_fn(torch.autograd.Function):
             input_fp4 = input
             weight_fp4 = weight
         else:
-            input_fp4 = rtn_1x16s_fp4_kernel_wrapper(input, scale_override=Quartet_II_fn.forward_scale_override, group_size=Quartet_II_fn.group_size)
-            weight_fp4 = rtn_1x16s_fp4_kernel_wrapper(weight, scale_override=Quartet_II_fn.forward_scale_override, group_size=Quartet_II_fn.group_size)
+            input_fp4 = rtn_1x16s_fp4_kernel_wrapper(input, scale_override=Quartet_II_fn.forward_scale_override, group_size=Quartet_II_fn.group_size, four_over_six=four_over_six)
+            weight_fp4 = rtn_1x16s_fp4_kernel_wrapper(weight, scale_override=Quartet_II_fn.forward_scale_override, group_size=Quartet_II_fn.group_size, four_over_six=four_over_six)
 
         ctx.save_for_backward(input_fp4, weight_fp4)
         return F.linear(input_fp4, weight_fp4)
@@ -300,7 +300,7 @@ class Quartet_II_fn(torch.autograd.Function):
                 input_fp4.T,
                 None,
             )
-            return grad_input, grad_weight, None, None, None, None
+            return grad_input, grad_weight, None, None, None, None, None
         
         # EW
         if ctx.amax_storage.e_ht_amax is None or not ctx.delayed_amax:
@@ -332,16 +332,17 @@ class Quartet_II_fn(torch.autograd.Function):
             None,
         )
         
-        return grad_input, grad_weight, None, None, None, None
+        return grad_input, grad_weight, None, None, None, None, None
 
 
 class Quartet_II_Linear(torch.nn.Linear):
-    def __init__(self, *args, hadamard_dim=32, delayed_amax=False, disable_forward_quant=False, disable_backward_quant=False, **kwargs):
+    def __init__(self, *args, hadamard_dim=32, delayed_amax=False, disable_forward_quant=False, disable_backward_quant=False, four_over_six=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.hadamard_dim = hadamard_dim
         self.delayed_amax = delayed_amax
         self.disable_forward_quant = disable_forward_quant
         self.disable_backward_quant = disable_backward_quant
+        self.four_over_six = four_over_six
         self.amax_storage = AmaxStorage()
         
         if Quartet_II_fn.hadamard_matrix is None:
@@ -349,4 +350,4 @@ class Quartet_II_Linear(torch.nn.Linear):
         
     
     def forward(self, x):
-        return Quartet_II_fn.apply(x, self.weight, self.amax_storage, self.delayed_amax, self.disable_forward_quant, self.disable_backward_quant)
+        return Quartet_II_fn.apply(x, self.weight, self.amax_storage, self.delayed_amax, self.disable_forward_quant, self.disable_backward_quant, self.four_over_six)

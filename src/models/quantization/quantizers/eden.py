@@ -116,7 +116,7 @@ class EdenSRQuantizer(BaseQuantizer):
         device="cuda",
     )
     
-    def __init__(self, hadamard_dim=32, group_dim=None, scale_dtype="fp32", unbiased="eden", rerotate=None, scale_override:float=1.0):
+    def __init__(self, hadamard_dim=32, group_dim=None, scale_dtype="fp32", unbiased="eden", rerotate=None, scale_override:float=1.0, four_over_six=False):
         super().__init__(4)
         
         self.hadamard_dim = hadamard_dim
@@ -130,6 +130,7 @@ class EdenSRQuantizer(BaseQuantizer):
         self.scale_dtype = scale_dtype
         self.unbiased = unbiased
         self.scale_override = scale_override
+        self.four_over_six = four_over_six
         
         if scale_override != 1 and unbiased == "sr":
             raise ValueError("Scale Override is incompatible with Stochastic Rounding")
@@ -196,17 +197,19 @@ class EdenSRQuantizer(BaseQuantizer):
             self.scale_dtype == "e4m3" and
             self.unbiased == "eden"
         ):
-            return eden_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim)
+            return eden_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.hadamard_dim, self.group_dim, self.four_over_six)
         elif (
             self.scale_dtype == "e4m3" and
             self.unbiased == "sr"
         ):
-            return sr_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim)
+            return sr_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim, self.four_over_six)
         elif (
             self.scale_dtype == "e4m3" and
             self.unbiased == "no"
         ):
-            return rtn_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim)
+            return rtn_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim, self.four_over_six)
+        
+        assert not self.four_over_six, f"four_over_six only works in triton"
 
         x_had = x_had.view(-1, self.group_dim)
         scales = x_had.abs().max(dim=-1, keepdim=True)[0]

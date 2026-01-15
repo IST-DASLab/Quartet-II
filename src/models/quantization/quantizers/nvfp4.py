@@ -35,7 +35,7 @@ class Nvfp4Quantizer(BaseQuantizer):
         device="cuda",
     )
     
-    def __init__(self, hadamard_dim=1, square: bool=True, scale_override: float=1.0):
+    def __init__(self, hadamard_dim=1, square: bool=True, scale_override: float=1.0, four_over_six: bool=False):
         super().__init__(4)
         
         self.hadamard_dim = hadamard_dim
@@ -45,6 +45,7 @@ class Nvfp4Quantizer(BaseQuantizer):
             )
         self.square = square
         self.scale_override = scale_override
+        self.four_over_six = four_over_six
 
     def __repr__(self):
         return (
@@ -72,12 +73,14 @@ class Nvfp4Quantizer(BaseQuantizer):
             self.hadamard_dim == 1 and
             not self.square
         ):
-            return rtn_1x16s_fp4_autograd.apply(x, self.scale_override, 16)
+            return rtn_1x16s_fp4_autograd.apply(x, self.scale_override, 16, self.four_over_six)
         elif (
             self.hadamard_dim == 1 and
             self.square
         ):
-            return rtn_16x16s_fp4_autograd.apply(x, self.scale_override, 16)
+            return rtn_16x16s_fp4_autograd.apply(x, self.scale_override, 16, self.four_over_six)
+        
+        assert not self.four_over_six, f"four_over_six only triton"
             
         
         if self.hadamard_dim != 1:
