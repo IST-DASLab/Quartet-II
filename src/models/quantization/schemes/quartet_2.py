@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from src.models.quantization.quantizers.nvfp4_triton import rtn_1x16s_fp4_kernel_wrapper
+from models.quantization.quantizers.nvfp4_triton import rtn_1x16s_fp4_kernel_wrapper
 
 
 def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.device):

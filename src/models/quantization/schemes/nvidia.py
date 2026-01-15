@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from src.models.quantization.quantizers.nvfp4_triton import rtn_1x16s_fp4_kernel_wrapper, rtn_16x16s_fp4_kernel_wrapper, sr_1x16s_fp4_kernel_wrapper
+from models.quantization.quantizers.nvfp4_triton import rtn_1x16s_fp4_kernel_wrapper, rtn_16x16s_fp4_kernel_wrapper, sr_1x16s_fp4_kernel_wrapper
 from .quartet_2 import get_hadamard_matrix, rerotate_hadamard
 
 class Nvidia_fn(torch.autograd.Function):
