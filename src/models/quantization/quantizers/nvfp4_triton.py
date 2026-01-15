@@ -5,6 +5,62 @@ import triton
 import triton.language as tl
 
 
+def rtn_fp4(x):
+    x_abs = tl.abs(x)
+    x_sign = tl.where(
+        x > 0,
+        1,
+        -1,
+    )
+    x_fp4_abs = tl.where(
+        x_abs >= 5,
+        6,
+        tl.where(
+            x_abs >= 3.5,
+            4,
+            tl.where(
+                x_abs >= 2.5,
+                3,
+                tl.where(
+                    x_abs >= 1.75,
+                    2,
+                    tl.where(
+                        x_abs >= 1.25,
+                        1.5,
+                        tl.where(
+                            x_abs >= 0.75,
+                            1,
+                            tl.where(
+                                x_abs >= 0.25,
+                                0.5,
+                                0.0,
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+    return x_fp4_abs * x_sign
+
+
+def get_scales(x, amax, val_max, scales_max):
+    s_dec = tl.where(
+        amax == 0.0,
+        1.0,
+        amax / scales_max / val_max,
+    )
+    
+    s_dec_b = tl.max(tl.abs(x), axis=-1, keep_dims=True) / val_max
+    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
+    s_dec_b_e4m3 = tl.where(
+        s_dec_b_e4m3 == 0,
+        1.0,
+        s_dec_b_e4m3,
+    )
+    return s_dec_b_e4m3, s_dec
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE": 64 * 32}),
@@ -31,70 +87,20 @@ def rtn_1x16s_fp4_kernel(
     mask = offsets < n_elements
     x_flat = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     
+    # group
+    x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
+    
     # amax
     scales_max = 447.99
     val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
-    s_dec = tl.where(
-        amax == 0.0,
-        1.0,
-        amax / scales_max / val_max,
-    )
     
-    # group
-    x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
-    
-    # scale
-    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / val_max
-    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
-    s_dec_b_e4m3 = tl.where(
-        s_dec_b_e4m3 == 0,
-        1.0,
-        s_dec_b_e4m3,
-    )
-    s_enc_b_inv = s_dec_b_e4m3 * s_dec
-    x_scaled = x_grouped / s_enc_b_inv
+    s_dec_b_e4m3, s_dec = get_scales(x_grouped, amax, val_max, scales_max)
+    x_scaled = x_grouped / (s_dec_b_e4m3 * s_dec)
     
     # quantize
-    x_scaled_abs = tl.abs(x_scaled)
-    x_scaled_sign = tl.where(
-        x_scaled > 0,
-        1,
-        -1,
-    )
-    x_fp4_abs = tl.where(
-        x_scaled_abs >= 5,
-        6,
-        tl.where(
-            x_scaled_abs >= 3.5,
-            4,
-            tl.where(
-                x_scaled_abs >= 2.5,
-                3,
-                tl.where(
-                    x_scaled_abs >= 1.75,
-                    2,
-                    tl.where(
-                        x_scaled_abs >= 1.25,
-                        1.5,
-                        tl.where(
-                            x_scaled_abs >= 0.75,
-                            1,
-                            tl.where(
-                                x_scaled_abs >= 0.25,
-                                0.5,
-                                0.0,
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    x_fp4 = x_fp4_abs * x_scaled_sign
-
-    # dequantize
-    x_dequantized = x_fp4 * s_enc_b_inv
+    x_fp4 = rtn_fp4(x_scaled)
+    x_dequantized = x_fp4 * (s_dec_b_e4m3 * s_dec)
     
     # Reshape back to flat form for storage
     x_dequantized_flat = tl.reshape(x_dequantized, (BLOCK_SIZE,))
@@ -167,16 +173,6 @@ def rtn_16x16s_fp4_kernel(
     x_flat = tl.load(x_ptr + offsets, mask=mask)
     # [BLOCK_SIZE, BLOCK_SIZE]
     
-    # amax
-    scales_max = 447.99
-    val_max = 6.0 / scale_override
-    amax = tl.load(amax_ptr)
-    s_dec = tl.where(
-        amax == 0.0,
-        1.0,
-        amax / scales_max / val_max,
-    )
-    
     # group
     x_grouped =  x_flat.reshape(
         BLOCK_SIZE // group_size, group_size, BLOCK_SIZE // group_size, group_size
@@ -187,56 +183,16 @@ def rtn_16x16s_fp4_kernel(
     )
     
     # scale
-    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / val_max
-    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
-    s_dec_b_e4m3 = tl.where(
-        s_dec_b_e4m3 == 0,
-        1.0,
-        s_dec_b_e4m3,
-    )
-    s_enc_b_inv = s_dec_b_e4m3 * s_dec
-    x_scaled = x_grouped / s_enc_b_inv
+    scales_max = 447.99
+    val_max = 6.0 / scale_override
+    amax = tl.load(amax_ptr)
+    
+    s_dec_b_e4m3, s_dec = get_scales(x_grouped, amax, val_max, scales_max)
+    x_scaled = x_grouped / (s_dec_b_e4m3 * s_dec)
     
     # quantize
-    x_scaled_abs = tl.abs(x_scaled)
-    x_scaled_sign = tl.where(
-        x_scaled > 0,
-        1,
-        -1,
-    )
-    x_fp4_abs = tl.where(
-        x_scaled_abs >= 5,
-        6,
-        tl.where(
-            x_scaled_abs >= 3.5,
-            4,
-            tl.where(
-                x_scaled_abs >= 2.5,
-                3,
-                tl.where(
-                    x_scaled_abs >= 1.75,
-                    2,
-                    tl.where(
-                        x_scaled_abs >= 1.25,
-                        1.5,
-                        tl.where(
-                            x_scaled_abs >= 0.75,
-                            1,
-                            tl.where(
-                                x_scaled_abs >= 0.25,
-                                0.5,
-                                0.0,
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    x_fp4 = x_fp4_abs * x_scaled_sign
-
-    # dequantize
-    x_dequantized = x_fp4 * s_enc_b_inv
+    x_fp4 = rtn_fp4(x_scaled)
+    x_dequantized = x_fp4 * (s_dec_b_e4m3 * s_dec)
     # [BLOCK_SIZE // group_size * BLOCK_SIZE // group_size, group_size * group_size]
     
     # Reshape back to flat form for storage
@@ -320,22 +276,9 @@ def sr_1x16s_fp4_kernel(
     scales_max = 447.99
     val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
-    s_dec = tl.where(
-        amax == 0.0,
-        1.0,
-        amax / scales_max / val_max,
-    )
     
-    # scale
-    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / val_max
-    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
-    s_dec_b_e4m3 = tl.where(
-        s_dec_b_e4m3 == 0,
-        1.0,
-        s_dec_b_e4m3,
-    )
-    s_enc_b_inv = s_dec_b_e4m3 * s_dec
-    x_scaled = x_grouped / s_enc_b_inv
+    s_dec_b_e4m3, s_dec = get_scales(x_grouped, amax, val_max, scales_max)
+    x_scaled = x_grouped / (s_dec_b_e4m3 * s_dec)
     
     # quantize
     x_scaled_abs = tl.abs(x_scaled)
@@ -404,8 +347,7 @@ def sr_1x16s_fp4_kernel(
         x_fp4_low,
     ) * x_scaled_sign
 
-    # dequantize
-    x_dequantized = x_fp4 * s_enc_b_inv
+    x_dequantized = x_fp4 * (s_dec_b_e4m3 * s_dec)
     
     # Reshape back to flat form for storage
     x_dequantized_flat = tl.reshape(x_dequantized, (BLOCK_SIZE,))
@@ -470,62 +412,16 @@ def eden_1x16s_fp4_kernel(
     # group
     x_grouped = tl.reshape(x_flat, (BLOCK_SIZE // group_size, group_size))
 
-    # amax
-    scales_max = 255.99 # Not 448 because eden needs space to rescale up a bit sometimes after the correction
+    # scale
+    scales_max = 255.99
     val_max = 6.0 / scale_override
     amax = tl.load(amax_ptr)
-    s_dec = tl.where(
-        amax == 0.0,
-        1.0,
-        amax / scales_max / val_max,
-    )
     
-    # scale
-    s_dec_b = tl.max(tl.abs(x_grouped), axis=-1, keep_dims=True) / val_max
-    s_dec_b_e4m3 = (s_dec_b / s_dec).to(tl.float8e4nv).to(tl.float32)
-    s_dec_b_e4m3 = tl.where(
-        s_dec_b_e4m3 == 0,
-        1.0,
-        s_dec_b_e4m3,
-    )
+    s_dec_b_e4m3, s_dec = get_scales(x_grouped, amax, val_max, scales_max)
     x_scaled = x_grouped / (s_dec_b_e4m3 * s_dec)
     
     # quantize
-    x_scaled_abs = tl.abs(x_scaled)
-    x_scaled_sign = tl.where(
-        x_scaled > 0,
-        1,
-        -1,
-    )
-    x_fp4 = tl.where(
-        x_scaled_abs >= 5,
-        6,
-        tl.where(
-            x_scaled_abs >= 3.5,
-            4,
-            tl.where(
-                x_scaled_abs >= 2.5,
-                3,
-                tl.where(
-                    x_scaled_abs >= 1.75,
-                    2,
-                    tl.where(
-                        x_scaled_abs >= 1.25,
-                        1.5,
-                        tl.where(
-                            x_scaled_abs >= 0.75,
-                            1,
-                            tl.where(
-                                x_scaled_abs >= 0.25,
-                                0.5,
-                                0,
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    ) * x_scaled_sign
+    x_fp4 = rtn_fp4(x_scaled)
     
     # Calculate EDEN scale
     x_scaled = tl.reshape(x_scaled, (BLOCK_SIZE // hadamard_dim, hadamard_dim))
