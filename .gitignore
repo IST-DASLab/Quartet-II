@@ -2,7 +2,6 @@
 datasets/
 wandb/
 exps/
-scripts/
 cluster/
 assets/*.csv
 assets/*.json
