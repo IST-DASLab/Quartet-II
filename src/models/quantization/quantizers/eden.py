@@ -206,8 +206,7 @@ class EdenSRQuantizer(BaseQuantizer):
             self.scale_dtype == "e4m3" and
             self.unbiased == "no"
         ):
-            amax = torch.amax(x_had)
-            return rtn_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim, amax)
+            return rtn_1x16s_fp4_kernel_wrapper(x_had, (17 / 16) * self.scale_override, self.group_dim)
 
         x_had = x_had.view(-1, self.group_dim)
         scales = x_had.abs().max(dim=-1, keepdim=True)[0]
