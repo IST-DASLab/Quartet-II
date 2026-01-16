@@ -270,6 +270,7 @@ class IsolatedEdenQuantizer(EdenSRQuantizer): # Specifically for testing backwar
                 x,
                 (17 / 16) * self.scale_override,
                 self.group_dim,
+                False,
             )
         
         self.hadamard_matrix = self.hadamard_matrix.to(x.device).to(x.dtype)
