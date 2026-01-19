@@ -7,26 +7,24 @@ mkdir -p "$LOG_DIR"
 # >>>>>>>>>
 # 1. Model Configs: "MODEL_SIZE_PREFIX:N_LAYER:N_EMBD:N_HEAD:LR:BASE_TOKENS"
 MODEL_CONFIGS=(
-    "30M:6:640:5:0.0012:3000000000"
-    "50M:7:768:6:0.0012:5000000000"
+    # "30M:6:640:5:0.0012:3000000000"
+    # "50M:7:768:6:0.0012:5000000000"
     "100M:8:1024:8:0.0009:10000000000"
     # "200M:10:1280:10:0.00072:20000000000"
 )
 
 # 2. Token Multipliers
 MULTIPLIERS=(
-    0.25
-    0.5
-    1
-    2
+    # 0.25
+    # 0.5
+    # 1
+    # 2
     4
     8
 )
 
 # 3. Quantization Setups: "GROUP_DIM:SCALE_DTYPE:UNBIASED"
 QUANT_SETUPS=(
-    # Hadamard
-    # "128:16:e4m3:eden:0.93"
     # No Hadamard
     "1:16:e4m3:sr:1.00"
 )

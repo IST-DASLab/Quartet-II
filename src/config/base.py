@@ -215,7 +215,7 @@ def parse_args(base_parser, args, namespace):
     parser.add_argument("--backward-scheme-kwargs", type=json.loads, default="{}")
     
     # Special quantization
-    parser.add_argument("--special-scheme", type=str, default=None, choices=[None, "quartet_v2", "nvidia"])
+    parser.add_argument("--special-scheme", type=str, default=None, choices=[None, "quartet_v2", "nvidia", "tetrajetv2"])
     parser.add_argument("--special-scheme-kwargs", type=json.loads, default="{}")
     
 
