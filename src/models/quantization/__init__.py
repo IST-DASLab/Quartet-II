@@ -6,7 +6,7 @@ from torch.autograd import Function
 
 from .backward import EW_EtX_Scheme, BACKWARD_SCHEMES
 from .quantizers import NoQuantizer, QUANTIZER_CLASSES
-from .schemes import Quartet_II_Linear, NvidiaLinear
+from .schemes import Quartet_II_Linear, NvidiaLinear, TetraJetV2Linear
 
 
 def build_quantized_linear(
@@ -24,6 +24,13 @@ def build_quantized_linear(
         )
     elif config.special_scheme == "nvidia":
         return NvidiaLinear(
+            in_dim,
+            out_dim,
+            bias=False,
+            **config.special_scheme_kwargs,
+        )
+    elif config.special_scheme == "tetrajetv2":
+        return TetraJetV2Linear(
             in_dim,
             out_dim,
             bias=False,

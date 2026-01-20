@@ -1,6 +1,6 @@
 #!/bin/bash
 
-LOG_DIR="/capstor/store/cscs/swissai/a140/codebases/backprop-scaling-laws/logs/slurm/quartetv2_sweep"
+LOG_DIR="/capstor/store/cscs/swissai/a140/codebases/backprop-scaling-laws/logs/slurm/tetrajetv2_sweep"
 mkdir -p "$LOG_DIR"
 
 
@@ -8,25 +8,24 @@ mkdir -p "$LOG_DIR"
 # 1. Model Configs: "MODEL_SIZE_PREFIX:N_LAYER:N_EMBD:N_HEAD:LR:BASE_TOKENS"
 MODEL_CONFIGS=(
     # "30M:6:640:5:0.0012:3000000000"
-    # "50M:7:768:6:0.0012:5000000000"
-    "100M:8:1024:8:0.0009:10000000000"
+    "50M:7:768:6:0.0012:5000000000"
+    # "100M:8:1024:8:0.0009:10000000000"
     # "200M:10:1280:10:0.00072:20000000000"
 )
 
 # 2. Token Multipliers
 MULTIPLIERS=(
-    # 0.25
-    # 0.5
-    # 1
-    # 2
+    0.25
+    0.5
+    1
+    2
     4
-    # 8
+    8
 )
 
-# 3. Quantization Setups: "HADAMARD_DIM:DELAYED_AMAX:DISABLE_FORWARD_QUANT:DISABLE_BACKWARD_QUANT:FOUR_OVER_SIX"
+# 3. Quantization Setups: "DISABLE_FORWARD_QUANT:DISABLE_BACKWARD_QUANT"
 QUANT_SETUPS=(
-    "128:false:false:false:false"
-    # "128:false:false:false:true"
+    "false:false"
 )
 # <<<<<<<<<
 
@@ -43,4 +42,4 @@ ARRAY_LIMIT=$((TOTAL_JOBS - 1))
 
 echo "Submitting Job Array with ${TOTAL_JOBS} tasks (Indices 0-${ARRAY_LIMIT})..."
 
-sbatch --array=0-${ARRAY_LIMIT} quartetv2_node.sh
+sbatch --array=0-${ARRAY_LIMIT} tetrajetv2_node.sh
