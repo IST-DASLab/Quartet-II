@@ -194,7 +194,7 @@ class Quartet_II_fn(torch.autograd.Function):
 
 
 class Quartet_II_linear(torch.nn.Linear):
-    def __init__(self, *args, four_over_six=False, dtype=torch.bfloat16, **kwargs):
+    def __init__(self, *args, four_over_six=True, dtype=torch.bfloat16, **kwargs):
         super().__init__(*args, dtype=dtype, **kwargs)
         assert dtype == torch.bfloat16
         self.four_over_six = four_over_six
