@@ -31,7 +31,35 @@ Inspect the scheme implementation at:
 
 ## NVFP4 Kernels
 
-Coming soon...
+We provide the kernels tuned for RTX 5090 (`sm120a`) in `./kernels`. They require CUDA 12.8 or newer and close to latest (~`2.9.0`) pytorch. Install them with
+
+```bash
+cd kernels
+pip install --no-build-isolation .
+```
+
+You can then use the provided drop-in NVFP4 `nn.Linear` replacement as follows:
+```python
+from quartet2.linear import Quartet_II_linear
+
+linear = Quartet_II_linear(
+    in_dim,
+    out_dim,
+    device="cuda",
+    dtype=torch.bfloat16,
+)
+...
+```
+
+You can further benchmark the kernels agains BF16, FP8 and [Quartet](https://arxiv.org/abs/2505.14669) with
+
+```bash
+cd test
+pythpn bench_linear.py
+```
+
+
+
 
 ## Cite This Work
 

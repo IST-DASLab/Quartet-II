@@ -1,0 +1,39 @@
+[project]
+name = "quartet2"
+version = "0.0.1"
+description = "Quartet V2"
+#readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "scipy>=1.17.0",
+    "setuptools>=80.10.1",
+    "torch>=2.10.0",
+    "tqdm>=4.67.1",
+]
+
+[build-system]
+requires = ["scikit-build-core>=0.11", "nanobind"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+wheel.py-api = "cp312"
+build.targets = ["_quartet2"]
+build-dir = "build/{wheel_tag}"
+cmake.build-type = "Release"
+
+[tool.scikit-build.cmake.define]
+CMAKE_CUDA_ARCHITECTURES = {env="CUDAARCHS"}
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "csrc/*" },
+    { file = "python/*" },
+    { file = "CMakeLists.txt" }
+]
+no-build-isolation-package = ["qutlass"]
