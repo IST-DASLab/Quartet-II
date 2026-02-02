@@ -2,6 +2,9 @@
 
 This is the official code for the Quartet II NVFP4 training paper [![arXiv](https://img.shields.io/badge/arXiv-2601.22813-b31b1b.svg)](https://arxiv.org/abs/2601.22813) 
 
+<img width="1286" height="521" alt="image" src="https://github.com/user-attachments/assets/2925e164-9998-4f43-9b6e-b806b8b5964b" />
+
+
 ## Quickstart 
 
 Create a conda environment and install dependencies (we recommend Python 3.11):
