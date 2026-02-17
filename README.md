@@ -48,11 +48,12 @@ linear = Quartet_II_linear(
     in_dim,
     out_dim,
     device="cuda",
-    dtype=torch.bfloat16,
     four_over_six=True, # Enables/Disables 4/6 on the forward pass. On by default
 )
 ...
 ```
+
+The kernels are compatible with the FP32->BF16 autocast.
 
 You can further benchmark the kernels agains BF16, FP8 and [Quartet](https://arxiv.org/abs/2505.14669) with
 
