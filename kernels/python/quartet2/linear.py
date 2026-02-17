@@ -1,8 +1,8 @@
 import torch
-import qutlass
+from flashinfer import mm_fp4
 
 from scipy.linalg import hadamard
-from .quant import quant_fp4, quant_had_eden, dequant_tp_had_eden
+from .quant import quant_fp4, rht128_quant_eden, rht128_requant, NVFP4QuantMode
 import nvtx
 import contextlib
 
@@ -31,12 +31,29 @@ def rerotate_hadamard(hadamard_matrix):
     return hadamard_matrix * signs[None, :] # NOTE: rerotate along last dim, inner dim for TN GEMM
 
 
-@torch.library.custom_op("clover::fp4_mm", mutates_args=())
+@torch.library.custom_op("quartet2::fp4_mm", mutates_args=())
 def _fp4_mm(x_fp4: torch.Tensor, w_fp4: torch.Tensor, x_mx: torch.Tensor, w_mx: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
-    return qutlass.matmul_nvf4_bf16_tn(
-        x_fp4, w_fp4,
-        x_mx, w_mx,
-        alpha=alpha)
+    m, packed_k = x_fp4.shape
+    k = packed_k * 2
+    n = w_fp4.shape[0]
+    BLOCK = 16
+    out = torch.empty([m, n], device=x_fp4.device, dtype=torch.bfloat16)
+
+    mm_fp4(
+        x_fp4,
+        w_fp4.T,
+        x_mx.view(-1, k // BLOCK),
+        w_mx.view(-1, k // BLOCK).T,
+        alpha,
+        torch.bfloat16,
+        out,
+        block_size=BLOCK,
+        use_8x4_sf_layout=False,
+        backend="cudnn",
+        use_nvfp4=True,
+    )
+
+    return out
 
 
 @_fp4_mm.register_fake
@@ -77,6 +94,14 @@ def to_blocked(input_matrix) -> torch.Tensor:
 
     return rearranged.flatten()
 
+def unblock(blocked_scales, rows, cols):
+    n_row_blocks, n_col_blocks = rows // 128, (cols // 16) // 4
+    rearranged = blocked_scales.reshape(-1, 32, 4, 4)
+    rearranged = rearranged.permute(0, 2, 1, 3).reshape(-1, n_col_blocks, 128, 4)
+    rearranged = rearranged.permute(0, 2, 1, 3)
+    # Reverse: view(n_row_blocks, 128, n_col_blocks, 4)
+    return rearranged.reshape(n_row_blocks * 128, n_col_blocks * 4)
+
 
 @torch.compile
 def _dq_fp4(x_e2m1: torch.Tensor, x_e4m3: torch.Tensor, alpha: float):
@@ -112,6 +137,7 @@ def _dq_fp4(x_e2m1: torch.Tensor, x_e4m3: torch.Tensor, alpha: float):
     x_fp4_dq = grid_dq[x_e2m1_unpacked]
 
     scales_dq = x_e4m3.to(torch.float32)
+    scales_dq = unblock(scales_dq, x_e2m1.shape[0], x_e2m1.shape[1] * 2)
     x_dq = (x_fp4_dq.unflatten(dim=-1, sizes=(-1, 16)) * scales_dq[..., None]).flatten(
         start_dim=-2
     ) * alpha
@@ -126,13 +152,19 @@ class Quartet_II_fn(torch.autograd.Function):
 
     #@torch.compile(dynamic=False)
     @staticmethod
-    def forward(ctx, input, weight, had, four_over_six: bool, disable_backward_quant: bool = False, weight_amax: torch.Tensor = None, input_amax: torch.Tensor = None, scratch_amax: torch.Tensor = None):
+    def forward(ctx, input, weight, had, mode: NVFP4QuantMode, disable_backward_quant: bool = False, weight_amax: torch.Tensor = None, input_amax: torch.Tensor = None, scratch_amax: torch.Tensor = None): 
         ctx.batch = input.shape[0]
         ctx.seq = input.shape[1]
         ctx.in_dim = weight.shape[1]
         ctx.out_dim = weight.shape[0]
         ctx.disable_backward_quant = disable_backward_quant
         ctx.scratch_amax = scratch_amax
+
+        autocast_enabled = torch.is_autocast_enabled("cuda")
+        if autocast_enabled:
+            input = input.to(torch.bfloat16)
+            weight = weight.to(torch.bfloat16)
+
         assert input.dtype == torch.bfloat16
 
         forward_scale_override = 1.0
@@ -146,15 +178,14 @@ class Quartet_II_fn(torch.autograd.Function):
                 weight_amax = abs_max(weight)
 
         with nvtx_annotate("Quant", color="yellow"):
-            input_fp4 = quant_fp4(flat_input, amax=input_amax, scale_override=forward_scale_override, four_over_six=four_over_six)
-            weight_fp4 = quant_fp4(weight, amax=weight_amax, scale_override=forward_scale_override, four_over_six=four_over_six)
-        # TODO save quantized for requant kernels
+            input_fp4 = quant_fp4(flat_input, amax=input_amax, scale_override=forward_scale_override, mode=mode)
+            weight_fp4 = quant_fp4(weight, amax=weight_amax, scale_override=forward_scale_override, mode=mode)
         ctx.save_for_backward(input_fp4.fp4, input_fp4.micro_scales, input_fp4.tensor_scale,
                               weight_fp4.fp4, weight_fp4.micro_scales, weight_fp4.tensor_scale, had)
         with nvtx_annotate("Matmul", color="blue"):
             res = _fp4_mm(
                 input_fp4.fp4, weight_fp4.fp4,
-                to_blocked(input_fp4.micro_scales), to_blocked(weight_fp4.micro_scales),
+                input_fp4.micro_scales, weight_fp4.micro_scales,
                 alpha=input_fp4.tensor_scale * weight_fp4.tensor_scale)
 
         return res.reshape(ctx.batch, ctx.seq, ctx.out_dim)
@@ -165,6 +196,10 @@ class Quartet_II_fn(torch.autograd.Function):
         # Load ctx and reshape
         xfp4, xs, xm, wfp4, ws, wm, had = ctx.saved_tensors
         backward_scale_override = (17 / 16) * 0.93
+
+        autocast_enabled = torch.is_autocast_enabled("cuda")
+        if autocast_enabled:
+            grad_output = grad_output.to(torch.bfloat16)
 
         # Re-randomize the rotation
         had = rerotate_hadamard(had)
@@ -179,28 +214,38 @@ class Quartet_II_fn(torch.autograd.Function):
 
         # EW
         with nvtx_annotate("Quant", color="yellow"):
-            e_ht_fp4, e_ht_ms, e_ht_ts = quant_had_eden(x=flat_grad_output, h=had, scale_override=backward_scale_override, scratch_amax=ctx.scratch_amax)
-            wt_ht_fp4, wt_ht_ms, wt_ht_ts = dequant_tp_had_eden(x=wfp4, x_group_scales=ws, x_tensor_scale=wm, h=had, scale_override=backward_scale_override, scratch_amax=ctx.scratch_amax)
+            e_ht_fp4, e_ht_ms, e_ht_ts = rht128_quant_eden(x=flat_grad_output, h=had[:16, :], scale_override=backward_scale_override, scratch_amax=ctx.scratch_amax)
+            wt_ht_fp4, wt_ht_ms, wt_ht_ts = rht128_requant(x=wfp4, x_group_scales=ws, x_tensor_scale=wm, h=had[:16, :], scale_override=backward_scale_override, scratch_amax=ctx.scratch_amax)
         with nvtx_annotate("Matmul", color="blue"):
-            grad_input = _fp4_mm(e_ht_fp4, wt_ht_fp4, to_blocked(e_ht_ms), to_blocked(wt_ht_ms), alpha=e_ht_ts*wt_ht_ts)
+            grad_input = _fp4_mm(e_ht_fp4, wt_ht_fp4, e_ht_ms, wt_ht_ms, alpha=e_ht_ts*wt_ht_ts)
 
         # EtX
         with nvtx_annotate("Quant", color="yellow"):
-            et_ht_fp4, et_ht_ms, et_ht_ts = quant_had_eden(x=flat_grad_output, h=had, scale_override=backward_scale_override, transpose=True, scratch_amax=ctx.scratch_amax)
-            xt_ht_fp4, xt_ht_ms, xt_ht_ts = dequant_tp_had_eden(x=xfp4, x_group_scales=xs, x_tensor_scale=xm, h=had, scale_override=backward_scale_override, scratch_amax=ctx.scratch_amax)
+            et_ht_fp4, et_ht_ms, et_ht_ts = rht128_quant_eden(x=flat_grad_output, h=had[:16, :], scale_override=backward_scale_override, transpose=True, scratch_amax=ctx.scratch_amax)
+            xt_ht_fp4, xt_ht_ms, xt_ht_ts = rht128_requant(x=xfp4, x_group_scales=xs, x_tensor_scale=xm, h=had[:16, :], scale_override=backward_scale_override, scratch_amax=ctx.scratch_amax)
         with nvtx_annotate("Matmul", color="blue"):
-            grad_weight = _fp4_mm(et_ht_fp4, xt_ht_fp4, to_blocked(et_ht_ms), to_blocked(xt_ht_ms), alpha=et_ht_ts*xt_ht_ts)
+            grad_weight = _fp4_mm(et_ht_fp4, xt_ht_fp4, et_ht_ms, xt_ht_ms, alpha=et_ht_ts*xt_ht_ts)
         return grad_input.reshape(ctx.batch, ctx.seq, ctx.in_dim), grad_weight, None, None, None, None, None, None
 
 
 class Quartet_II_linear(torch.nn.Linear):
-    def __init__(self, *args, four_over_six=True, dtype=torch.bfloat16, **kwargs):
-        super().__init__(*args, dtype=dtype, **kwargs)
-        assert dtype == torch.bfloat16
-        self.four_over_six = four_over_six
+    def __init__(self, *args, four_over_six=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mode = NVFP4QuantMode.FOUR_SIX if four_over_six else NVFP4QuantMode.RNE
         self.weight_abs_max = None
-        self.register_buffer("had", get_hadamard_matrix(128, self.weight.dtype, self.weight.device))
-        self.register_buffer("scratch_amax", torch.empty((), dtype=torch.int32, device=self.weight.device))
+        # initialize hadamard matrix.
+        # *if* we are on meta device, initialization will be deferred until we move to real device (handled in _apply)
+        had = get_hadamard_matrix(128, torch.bfloat16, self.weight.device) if self.weight.device.type != 'meta' else None
+        self.register_buffer("had", had, persistent=False)
+        self.register_buffer("scratch_amax", torch.empty((), dtype=torch.uint32, device=self.weight.device), persistent=False)
+
+    def _apply(self, fn):
+        old_device = self.weight.device
+        super()._apply(fn)
+        # if we move from meta device to real device, we need to create the hadamard matrix
+        if old_device.type == 'meta' and self.weight.device.type != 'meta':
+            self.had = get_hadamard_matrix(128, torch.bfloat16, self.weight.device)
+        return self
 
     def forward(self, x, disable_backward_quant=False, input_abs_max=None):
-        return Quartet_II_fn.apply(x, self.weight[...], self.had, self.four_over_six, disable_backward_quant, self.weight_abs_max, input_abs_max, self.scratch_amax)
+        return Quartet_II_fn.apply(x, self.weight[...], self.had, self.mode, disable_backward_quant, self.weight_abs_max, input_abs_max, self.scratch_amax)

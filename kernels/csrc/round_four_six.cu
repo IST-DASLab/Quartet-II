@@ -21,19 +21,20 @@ struct QuantResult {
     __nv_fp8_e4m3 fp8s;
 };
 
-__device__ __forceinline__ QuantResult quantize(float abs_max, float val_max, float scale, bf16x8& x) {
-    float s_group = abs_max / val_max;
-    __nv_fp8_e4m3 s_as_fp8 = static_cast<__nv_fp8_e4m3>(s_group / scale);
+__device__ __forceinline__ QuantResult quantize(float abs_max, float inv_val_max, float scale, bf16x8& x) {
+    float s_group = abs_max * inv_val_max;
+    float inv_scale = reciprocal_approximate_ftz(scale);
+    __nv_fp8_e4m3 s_as_fp8 = static_cast<__nv_fp8_e4m3>(s_group * inv_scale);
     float s_round_fp8 = static_cast<float>(s_as_fp8);
     if (s_round_fp8 == 0) s_round_fp8 = 1.f;
 
-    float factor = 1.f / (s_round_fp8 * scale);
+    float factor = reciprocal_approximate_ftz(s_round_fp8 * scale);
+    float2 factor2 = {factor, factor};
     fp4x8 result;
     for (int k = 0; k < bf16x8::size; k += 2) {
-        float2 src;
-        src.x = static_cast<float>(x[k+0]) * factor;
-        src.y = static_cast<float>(x[k+1]) * factor;
-        unsigned char bits = __nv_cvt_float2_to_fp4x2(src, __nv_fp4_interpretation_t::__NV_E2M1, cudaRoundMode::cudaRoundNearest);
+        float2 src = make_float2(static_cast<float>(x[k+0]), static_cast<float>(x[k+1]));
+        float2 scaled = __fmul2_rn(src, factor2);
+        unsigned char bits = __nv_cvt_float2_to_fp4x2(scaled, __nv_fp4_interpretation_t::__NV_E2M1, cudaRoundMode::cudaRoundNearest);
         result[k/2] = bits;
     }
 
@@ -61,35 +62,38 @@ struct get_candidate_helper;
 
 template<float Value, float... Others>
 struct get_candidate_helper<Value, Others...> {
-    static __forceinline__ __device__ float get(int i) {
-        if (i == 0) return Value;
-        return get_candidate_helper<Others...>::get(i - 1);
+    static constexpr __forceinline__ __device__ float get_inv(int i) {
+        constexpr float inv_val = 1.f / Value;
+        if (i == 0) return inv_val;
+        return get_candidate_helper<Others...>::get_inv(i - 1);
     }
 };
 
 template<>
 struct get_candidate_helper<> {
-    static __forceinline__ __device__ float get(int i) {
+    static constexpr __forceinline__ __device__ float get_inv(int i) {
         __builtin_unreachable();
     }
 };
 
 template<float... Candidates>
-__global__ void four_six_fp4_kernel(__nv_fp4x4_e2m1* y_ptr, __nv_fp8_e4m3* scale_ptr, float* global_scale_ptr, const nv_bfloat16* x_ptr, const float* amax_ptr, float inv_scale_override, int nvecs) {
+__global__ void four_six_fp4_kernel(__nv_fp4x4_e2m1* y_ptr, __nv_fp8_e4m3* scale_ptr, float* global_scale_ptr, const nv_bfloat16* x_ptr, const float* amax_ptr, float scale_override, int nvecs, int cols) {
     constexpr int NumCandidates = sizeof...(Candidates);
     float global_abs_max = *amax_ptr;
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(idx >= nvecs) return;
 
-    constexpr float scales_max = NumCandidates > 1 ? 256.f : 448.f;
-    float val_max = 6.f * inv_scale_override;
-    float scale = global_abs_max == 0 ? 1.f : global_abs_max / scales_max / val_max;
+    bf16x8 x = bf16x8::load(x_ptr + 8 * idx);
+
+    constexpr float inv_scales_max = NumCandidates > 1 ? 1.f / 256.f : 1.f / 448.f;
+    constexpr float one_over_six = 1.f / 6.f;
+    float inv_val_max = scale_override * one_over_six;
+    float scale = global_abs_max == 0 ? 1.f : global_abs_max * inv_scales_max * inv_val_max;
     if (idx == 0) {
         global_scale_ptr[0] = scale;
     }
 
     // per-group abs-maxes
-    bf16x8 x = bf16x8::load(x_ptr + 8 * idx);
     nv_bfloat16 local_abs_max = vecReduceAbsMax(x);
     // shuffle with neighbour. Can't use __reduce_max_sync because that doesn't allow partial reductions
     nv_bfloat16 other_abs_max = __shfl_xor_sync(0xffffffff, local_abs_max, 1);
@@ -101,7 +105,8 @@ __global__ void four_six_fp4_kernel(__nv_fp4x4_e2m1* y_ptr, __nv_fp8_e4m3* scale
     float best = INFINITY;
     QuantResult res;
     for (int i = 0; i < NumCandidates; ++i) {
-        results[i] = quantize(full_abs_max, get_candidate_helper<Candidates...>::get(i) * inv_scale_override, scale, x);
+        float inv_val = get_candidate_helper<Candidates...>::get_inv(i);
+        results[i] = quantize(full_abs_max, inv_val * scale_override, scale, x);
         scores[i] = quant_error(x, results[i], scale);
         if (scores[i] < best) {
             best = scores[i];
@@ -110,24 +115,27 @@ __global__ void four_six_fp4_kernel(__nv_fp4x4_e2m1* y_ptr, __nv_fp8_e4m3* scale
     }
     res.bits.store(reinterpret_cast<unsigned char*>(y_ptr) + 4 * idx);
     if (idx % 2 == 0) {
-        scale_ptr[idx / 2] = res.fp8s;
+        int col = (idx / 2) % cols;
+        int row = (idx / 2) / cols;
+        auto tgt = cvt_quant_to_fp4_get_sf_out_offset(row, col, cols / 4);
+        scale_ptr[tgt] = res.fp8s;
     }
 }
 
-void four_six_fp4(__nv_fp4x4_e2m1* y_ptr, __nv_fp8_e4m3* scale_ptr, float* global_scale_ptr, const nv_bfloat16* x_ptr, const float* amax_ptr, float scale_override, long nelem) {
-    if (nelem % 8 != 0) throw std::runtime_error("four_six_fp4: nelem must be divisible by 8");
-    int n_vecs = nelem / 8;
+void four_six_fp4(__nv_fp4x4_e2m1* y_ptr, __nv_fp8_e4m3* scale_ptr, float* global_scale_ptr, const nv_bfloat16* x_ptr, const float* amax_ptr, float scale_override, long rows, long cols) {
+    if (cols % 128 != 0) throw std::runtime_error("four_six_fp4: cols must be divisible by 128");
+    int n_vecs = rows * cols / 8;
     int block_size = 256;
     int n_blocks = (n_vecs + block_size - 1) / block_size;
-    four_six_fp4_kernel<6.f, 4.f><<<n_blocks, block_size>>>(y_ptr, scale_ptr, global_scale_ptr, x_ptr, amax_ptr, 1.f / scale_override, n_vecs);
+    four_six_fp4_kernel<6.f, 4.f><<<n_blocks, block_size>>>(y_ptr, scale_ptr, global_scale_ptr, x_ptr, amax_ptr, scale_override, n_vecs, cols / 16);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void rtn_fp4(__nv_fp4x4_e2m1* y_ptr, __nv_fp8_e4m3* scale_ptr, float* global_scale_ptr, const nv_bfloat16* x_ptr, const float* amax_ptr, float scale_override, long nelem) {
-    if (nelem % 8 != 0) throw std::runtime_error("rtn_fp4: nelem must be divisible by 8");
-    int n_vecs = nelem / 8;
+void rtn_fp4(__nv_fp4x4_e2m1* y_ptr, __nv_fp8_e4m3* scale_ptr, float* global_scale_ptr, const nv_bfloat16* x_ptr, const float* amax_ptr, float scale_override, long rows, long cols) {
+    if (cols % 128 != 0) throw std::runtime_error("rtn_fp4: cols must be divisible by 128");
+    int n_vecs = (rows * cols) / 8;
     int block_size = 256;
     int n_blocks = (n_vecs + block_size - 1) / block_size;
-    four_six_fp4_kernel<6.f><<<n_blocks, block_size>>>(y_ptr, scale_ptr, global_scale_ptr, x_ptr, amax_ptr, 1.f / scale_override, n_vecs);
+    four_six_fp4_kernel<6.f><<<n_blocks, block_size>>>(y_ptr, scale_ptr, global_scale_ptr, x_ptr, amax_ptr, scale_override, n_vecs, cols / 16);
     CUDA_CHECK(cudaGetLastError());
 }

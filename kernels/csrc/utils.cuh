@@ -114,6 +114,21 @@ __device__ __forceinline__ void global_to_shared_16_32_swizzle(nv_bfloat16* __re
                 16);
 }
 
+//! swizzles the rows of H such that we can use wider stores after the matmul
+__device__ __forceinline__ void global_to_shared_swizzle_H(nv_bfloat16* __restrict__ shared, const nv_bfloat16* __restrict__ global, int stride) {
+    int col = threadIdx.x % 2;
+    int row = threadIdx.x / 2;
+
+    // Apply row permutation to H: [0,1,4,5, 8,9,12,13, 2,3,6,7, 10,11,14,15]
+    const int permuted_row = (row % 2) + ((row % 8) / 2) * 4 + (row/8) * 2;
+
+    __pipeline_memcpy_async(
+                shared + swizzle_smem(row, col),
+                global + col * 8 + permuted_row * stride,
+                16);
+}
+
+
 __device__ __forceinline__ void global_to_shared_swizzle(__nv_fp4x2_storage_t* __restrict__ shared, const __nv_fp4x2_storage_t* __restrict__ global, int stride) {
     int col = threadIdx.x % 2;
     int row = threadIdx.x / 2;
@@ -182,6 +197,25 @@ __device__ __forceinline__ void store_fragment_row_major_sync(m16_n16_k32_c_frag
     vptr[row_stride * (g4 + 0) + c4 + 4] = make_bfloat162((nv_bfloat16)c.v[4], (nv_bfloat16)c.v[5]);
     vptr[row_stride * (g4 + 8) + c4 + 4] = make_bfloat162((nv_bfloat16)c.v[6], (nv_bfloat16)c.v[7]);
 }
+
+// stores non-adjacent results next to each other, based on global_to_shared_swizzle_H
+template<typename AccDType>
+__device__ __forceinline__ void store_fragment_row_major_sync_compressed(m16_n16_k32_c_fragment<AccDType>& c, nv_bfloat16* ptr, int row_stride) {
+    int g4 = threadIdx.x / 4;
+    int c4 = threadIdx.x % 4;
+    GenericVector<nv_bfloat16, 4> res;
+    res[0] = c.v[0];
+    res[1] = c.v[1];
+    res[2] = c.v[4];
+    res[3] = c.v[5];
+    res.store(ptr + row_stride * (g4 + 0) + 4 * c4);
+    res[0] = c.v[2];
+    res[1] = c.v[3];
+    res[2] = c.v[6];
+    res[3] = c.v[7];
+    res.store(ptr + row_stride * (g4 + 8) +  4 * c4);
+}
+
 
 template<typename AType, typename BType>
 __device__ __forceinline__ void mma_m16_n16_sync(m16_n16_k32_c_fragment<float>& d,
@@ -252,14 +286,21 @@ static __device__ __forceinline__ float2 __nv_cvt_fp4x2_to_float2(__nv_fp4x2_sto
 template<std::size_t Size>
 static __forceinline__ __device__ nv_bfloat16 vecReduceAbsMax(GenericVector<nv_bfloat16, Size> val) {
     // use nv_bfloat162 reduction instructions to require only half as many instructions as a naive implementation.
+    // unfortunately, there is no `max.abs.bf16x2`, but we have to use the `.xorsign` version
+    // which outputs the xor of signs in the sign bit. So we ignore the signs until the very last
+    // reduction step, and only then introduce an actual max.
     static_assert(Size == 4 || Size == 8, "Size must be 4 or 8");
     // first iteration, we need to take the maximum
 #pragma unroll
     for (int k = 0; k < Size; k += 4) {
-        nv_bfloat162 m = __hmax2(
-            __habs2( make_bfloat162(val[k], val[k+1]) ),
-            __habs2( make_bfloat162(val[k + 2], val[k + 3]) )
-        );
+        nv_bfloat162 m, a, b;
+        a = make_bfloat162(val[k], val[k+1]);
+        b = make_bfloat162(val[k + 2], val[k + 3]);
+        __asm__ volatile (
+            "max.xorsign.abs.bf16x2 %0, %1, %2;"
+            : "=r"(reinterpret_cast<int&>(m))
+            : "r"(reinterpret_cast<int&>(a)), "r"(reinterpret_cast<int&>(b))
+            );
         val[k/2] = m.x;
         val[k/2 + 1] = m.y;
     }
@@ -267,12 +308,20 @@ static __forceinline__ __device__ nv_bfloat16 vecReduceAbsMax(GenericVector<nv_b
     // all further iterations already get positive values
     for (std::size_t end = Size / 2; end >= 4; end /= 2) {
         for (int k = 0; k < end; k += 4) {
-            nv_bfloat162 m = __hmax2(make_bfloat162(val[k], val[k+1]), make_bfloat162(val[k + 2], val[k + 3]));
+            nv_bfloat162 m, a, b;
+            a = make_bfloat162(val[k], val[k+1]);
+            b = make_bfloat162(val[k + 2], val[k + 3]);
+            __asm__ volatile (
+                "max.xorsign.abs.bf16x2 %0, %1, %2;"
+                : "=r"(reinterpret_cast<int&>(m))
+                : "r"(reinterpret_cast<int&>(a)), "r"(reinterpret_cast<int&>(b))
+                );
             val[k/2] = m.x;
             val[k/2 + 1] = m.y;
         }
     }
-    return __hmax(val[0], val[1]);
+    nv_bfloat162 abs = __habs2(make_bfloat162(val[0], val[1]));
+    return __hmax(abs.x, abs.y);
 }
 
 static __device__ __forceinline__ uint2 mul_hilo(std::uint32_t a, std::uint32_t b) {
@@ -313,7 +362,7 @@ static __device__ __forceinline__ uint4 philox(std::uint64_t seed, std::uint32_t
     return make_uint4(R0, L0, R1, L1);
 }
 
-static __device__ __forceinline__ __nv_fp8_e4m3 stochastic_rounding(float in, unsigned int noise) {
+static __device__ __forceinline__ __nv_fp8_e4m3 stochastic_rounding(float in, unsigned short noise) {
     // out of range?
     __nv_fp8_e4m3 out;
     if (fabs(in) > 448.f || fabs(in) < 0.015625) {
@@ -323,13 +372,72 @@ static __device__ __forceinline__ __nv_fp8_e4m3 stochastic_rounding(float in, un
         // makes sure each thread gets a different random number
         // E8M23 vs E4M3 => 20 mantissa bits will be rounded away => mask 0xfffff
         constexpr unsigned SR_MASK = 0x000F'FFFF;
-        unsigned int threshold = noise & SR_MASK;
+        unsigned int threshold = (noise << 4u) & SR_MASK;
         unsigned int float_bits = __float_as_uint(in);
         unsigned int rounded_bits = float_bits & SR_MASK;
         float_bits = (rounded_bits > threshold) ? (float_bits | SR_MASK) : (float_bits  & ~SR_MASK);
         out.__x = __nv_cvt_float_to_fp8(__uint_as_float(float_bits), __NV_SATFINITE, __NV_E4M3);
     }
     return out;
+}
+
+// https://github.com/LopezCastroRoberto/vllm/blob/028ce6772826a2d227f5761990b52d4fd8425a34/csrc/quantization/fp4/nvfp4_utils.cuh#L326
+// Compute SF output offset for swizzled tensor core layout.
+// SF layout: [numMTiles, numKTiles, 32, 4, 4]
+// Caller must precompute: numKTiles = (numCols + 63) / 64
+__device__ __forceinline__ int64_t cvt_quant_to_fp4_get_sf_out_offset(
+    int mIdx, int kIdx, int32_t numKTiles) {
+    // Decompose indices using bitwise ops (all divisors are powers of 2).
+    // SF layout [numMTiles, numKTiles, 32 (mTile), 4 (mTile), 4(kTile)]
+    int32_t mTileIdx = mIdx >> 7;         // mIdx / 128
+    int32_t outerMIdx = mIdx & 31;        // mIdx % 32
+    int32_t innerMIdx = (mIdx >> 5) & 3;  // (mIdx / 32) % 4
+    int32_t kTileIdx = kIdx >> 2;         // kIdx / 4
+    int32_t innerKIdx = kIdx & 3;         // kIdx % 4
+
+    // Compute global SF offset: mTileIdx * (numKTiles * 512) + kTileIdx * 512 +
+    //                           outerMIdx * 16 + innerMIdx * 4 + innerKIdx
+    // Use bitwise OR for non-overlapping lower bits.
+    int64_t SFOffset = (static_cast<int64_t>(mTileIdx) * numKTiles + kTileIdx)
+                           << 9 |
+                       (outerMIdx << 4) | (innerMIdx << 2) | innerKIdx;
+
+    return SFOffset;
+}
+
+static __device__ __forceinline__ float reciprocal_approximate_ftz(float a) {
+    float b;
+    asm volatile("rcp.approx.ftz.f32 %0, %1;\n" : "=f"(b) : "f"(a));
+    return b;
+}
+
+__device__ __forceinline__ m16_n16_k32_c_fragment<float> add_c_fragments(m16_n16_k32_c_fragment<float> lhs, m16_n16_k32_c_fragment<float> rhs) {
+    m16_n16_k32_c_fragment<float> result;
+    for (int i = 0; i < 8; i += 2) {
+        float2 pl = {lhs.v[i], lhs.v[i+1]};
+        float2 pr = {rhs.v[i], rhs.v[i+1]};
+        float2 sum = __fadd2_rn(pl, pr);
+        result.v[i] = sum.x;
+        result.v[i+1] = sum.y;
+    }
+    return result;
+}
+
+__device__ __forceinline__ m16_n16_k32_c_fragment<float> sub_c_fragments(m16_n16_k32_c_fragment<float> lhs, m16_n16_k32_c_fragment<float> rhs) {
+    m16_n16_k32_c_fragment<float> result;
+    for (int i = 0; i < 8; i += 2) {
+        __asm volatile (
+            "{\n"
+            ".reg .b64 a, b, d;\n"
+            "mov.b64 a, {%2, %3};\n"
+            "mov.b64 b, {%4, %5};\n"
+            "sub.rn.ftz.f32x2 d, a, b;\n"
+            "mov.b64 {%0, %1}, d;\n"
+            "}\n"
+            : "=f"(result.v[i]), "=f"(result.v[i+1])
+            : "f"(lhs.v[i]), "f"(lhs.v[i+1]), "f"(rhs.v[i]), "f"(rhs.v[i+1]));
+    }
+    return result;
 }
 
 /// This exception will be thrown for reported cuda errors
@@ -355,3 +463,8 @@ inline void cuda_throw_on_error(cudaError_t status, const char* statement, const
 }
 
 #define CUDA_CHECK(status) cuda_throw_on_error(status, #status, __FILE__, __LINE__)
+
+
+struct alignas(1024) AlignedSmem  {
+    std::byte content[1024];
+};

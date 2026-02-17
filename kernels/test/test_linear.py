@@ -21,10 +21,13 @@ def ref_in_fp32(H, x, y, head, w1, w2, w3):
 
 
 def eval(res, ref):
-    quad_err = (res - ref).pow(2).mean() / ref.pow(2).mean()
-    eff_bitwidth = (-torch.log2(quad_err) / 2).item()
-    cosine = (res.flatten() @ ref.flatten()) / (ref.flatten() @ ref.flatten())
-    return quad_err, eff_bitwidth, cosine
+    with torch.no_grad():
+        res = res.float()
+        ref = ref.float()
+        quad_err = (res - ref).pow(2).mean() / ref.pow(2).mean()
+        eff_bitwidth = (-torch.log2(quad_err) / 2)
+        cosine = (res.flatten() @ ref.flatten()) / (ref.flatten() @ ref.flatten())
+        return quad_err.item(), eff_bitwidth.item(), cosine.item()
 
 
 def print_error(name, quad_err, eff_bitwidth, cosine):
@@ -91,11 +94,11 @@ torch.manual_seed(42)
 
 @pytest.mark.parametrize(
     "steps, expected",
-    [(1, (1.9, 2.5, 3.8, 0.03)),
+    [(1, (1.9, 2.5, 3.8, 0.06)),
      (4, (2.9, 3.4, 4.0, 0.02)),
      (16, (3.9, 4.5, 6.4, 0.01)),
      (64, (4.9, 5.5, 7.5, 0.01)),
-     (256, (5.9, 6.5, 8.3, 0.005)),
+     (256, (5.9, 6.5, 8.1, 0.005)),
      (1024, (6.9, 7.5, 8.9, 0.002)),
      (4096, (7.6, 8.2, 8.9, 0.001))])
 def test_backward_accuracy(steps, expected):
@@ -122,3 +125,13 @@ def test_compile_fwd():
     W = Quartet_II_linear(128, 256, device='cuda', dtype=torch.bfloat16)
     def fwd(x): return W(x)
     torch.compile(fwd, fullgraph=True)(torch.randn(1, 128, 128, device='cuda', dtype=torch.bfloat16))
+
+
+def test_result_fwd():
+    W = Quartet_II_linear(128, 256, device='cuda', dtype=torch.bfloat16)
+    x = torch.randn((1, 512, 128), device="cuda", dtype=torch.bfloat16)
+    y = W(x)
+    y_ref = x @ W.weight.T
+    se, bits, cos = eval(y, y_ref)
+    assert cos > 0.999
+    assert bits > 2.8

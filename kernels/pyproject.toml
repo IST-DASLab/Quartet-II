@@ -1,18 +1,24 @@
 [project]
 name = "quartet2"
-version = "0.0.1"
+version = "0.0.2"
 description = "Quartet V2"
 #readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-dependencies = []
+authors = [
+    { name = "Erik Schultheis", email = "erik.schultheis@ist.ac.at" }
+]
+dependencies = [
+    "flashinfer-python>=0.6.3",     # nvfp4 gemm
+    "scipy>=1.17.0",                # hadamard
+    "torch>=2.10.0",
+    "nvtx",                         # TODO make this dev only
+]
 
 [project.optional-dependencies]
 test = [
-    "scipy>=1.17.0",
-    "setuptools>=80.10.1",
-    "torch>=2.10.0",
     "tqdm>=4.67.1",
+    "pytest"
 ]
 
 [build-system]
@@ -36,4 +42,12 @@ cache-keys = [
     { file = "python/*" },
     { file = "CMakeLists.txt" }
 ]
-no-build-isolation-package = ["qutlass"]
+#no-build-isolation-package = ["qutlass"]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
