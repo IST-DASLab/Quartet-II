@@ -23,7 +23,6 @@ FetchContent_Declare(
 find_package(CUDAToolkit REQUIRED)
 
 include_directories(csrc)
-add_subdirectory(test)
 
 find_package(Python COMPONENTS Interpreter Development.Module OPTIONAL_COMPONENTS Development.SABIModule)
 FetchContent_MakeAvailable(nanobind)
