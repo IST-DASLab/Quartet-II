@@ -31,7 +31,9 @@ Inspect the scheme implementation at:
 
 ## NVFP4 Kernels
 
-We provide the kernels tuned for RTX 5090 (`sm120a`) in `./kernels`. They require CUDA 12.8 or newer and close to latest (~`2.9.0`) pytorch. Install them with
+We provide the kernels tuned for RTX 5090 (`sm120a`) and B200 (`sm100`) in `./kernels`.
+
+The kernels were tested with **CUDA 13.0**, **PyTorch 2.10** and **Python 3.11**. Install them with
 
 ```bash
 cd kernels
@@ -46,19 +48,19 @@ linear = Quartet_II_linear(
     in_dim,
     out_dim,
     device="cuda",
-    dtype=torch.bfloat16,
+    four_over_six=True, # Enables/Disables 4/6 on the forward pass. On by default
 )
 ...
 ```
+
+The kernels are compatible with the FP32->BF16 autocast.
 
 You can further benchmark the kernels agains BF16, FP8 and [Quartet](https://arxiv.org/abs/2505.14669) with
 
 ```bash
 cd test
-pythpn bench_linear.py
+python bench_linear.py
 ```
-
-
 
 
 ## Cite This Work

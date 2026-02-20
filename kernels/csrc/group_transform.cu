@@ -28,7 +28,7 @@ __global__ void group_transform_128_naive_kernel(nv_bfloat16* y, const nv_bfloat
     }
 }
 //! Calculates X H^T efficiently for shape(H) = (128, 128)
-__global__ void group_transform_128_kernel(nv_bfloat16* y, const nv_bfloat16* h, const nv_bfloat16* x, int groups) {
+__global__ void __launch_bounds__(8*32, 1) group_transform_128_kernel(nv_bfloat16* y, const nv_bfloat16* h, const nv_bfloat16* x, int groups) {
     constexpr int G = 128;
     constexpr int T = 16;
     constexpr int W = 8;
@@ -181,7 +181,7 @@ void group_transform_128_launcher(nv_bfloat16* y, const nv_bfloat16* H, const nv
     int smem = 8 * 16 * 128 * 2;
     CUDA_CHECK(cudaGetDevice(&device));
     CUDA_CHECK(cudaFuncSetAttribute(group_transform_128_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, group_transform_128_kernel, 32*4, smem));
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, group_transform_128_kernel, 32*8, smem));
     int sms;
     CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
     group_transform_128_kernel<<<sms * blocks, dim3(32, 8), smem>>>(y, H, x, groups / 16);
@@ -194,7 +194,7 @@ void group_transform_128_tp_launcher(nv_bfloat16* y, const nv_bfloat16* H, const
     int smem = 8 * 16 * 128 * 2;
     CUDA_CHECK(cudaGetDevice(&device));
     CUDA_CHECK(cudaFuncSetAttribute(group_transform_128_tp_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, group_transform_128_tp_kernel, 32*4, smem));
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, group_transform_128_tp_kernel, 32*8, smem));
     int sms;
     CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
     group_transform_128_tp_kernel<<<sms * blocks, dim3(32, 8), smem>>>(y, H, x, M, N);
@@ -206,4 +206,3 @@ void group_transform_128(nv_bfloat16* y, const nv_bfloat16* H, const nv_bfloat16
     if (transpose) group_transform_128_tp_launcher(y, H, x, M, N);
     else group_transform_128_launcher(y, H, x, M, N);
 }
-

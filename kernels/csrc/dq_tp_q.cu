@@ -16,6 +16,7 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_dequant_tp_quant_kern
     constexpr int G = 128;
     constexpr int T = 16;
     constexpr int W = NUM_WARPS;
+    constexpr int WarpSize = 32;
 
     constexpr int T_PER_G = G / T;
 
@@ -36,18 +37,31 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_dequant_tp_quant_kern
         // upper-left corner of the tiles
         nv_bfloat16* smem_base = h_smem + i * T * T + j * T * G;
         const nv_bfloat16* gmem_base = h + i * T + j * T * G;
-        global_to_shared_16_32_swizzle(smem_base, gmem_base, G);
+        global_to_shared_swizzle_H(smem_base, gmem_base, G);
     }
     __pipeline_commit();
 
+    float global_scale = *x_global_scale;
+
     const int groups = rows * cols / (G * T);
+    __nv_fp8_e4m3 next_group_scales[T_PER_G];
     if (int i = start_i; i < groups) {
         const int col = (i * T) % cols;
         const int row = (i * T) / cols * G;
-        for (int s = 0; s < T_PER_G; ++s) {
-            __nv_fp4x2_storage_t* smem_base = a_q_smem + s * T * T / 2;
-            const __nv_fp4x2_storage_t* gmem_base = x + col / 2 + (row + s * T) * cols / 2;
-            global_to_shared_swizzle(smem_base, gmem_base, cols);
+        int s_row = threadIdx.x;
+
+        __nv_fp4x2_storage_t* smem_base = a_q_smem + s_row * T / 2;
+        const __nv_fp4x2_storage_t* gmem_base = x + col / 2 + (row + s_row) * cols / 2;
+        for (int s = 0; s < G / WarpSize; ++s) {
+            __pipeline_memcpy_async(
+                        smem_base + s * WarpSize * T / 2,
+                        gmem_base + s * WarpSize * cols / 2,
+                        8);
+        }
+        for (int k = 0; k < T_PER_G; ++k) {
+            const int s_row = threadIdx.x / 2;
+            int scale_idx = cvt_quant_to_fp4_get_sf_out_offset(row + s_row + k * T, col / T, cols / 64);
+            next_group_scales[k] = x_scales[scale_idx];
         }
     }
     __pipeline_commit();
@@ -58,18 +72,26 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_dequant_tp_quant_kern
     for (int i = start_i; i < groups; i += W * gridDim.x) {
         __pipeline_wait_prior(0);
 
-        // dequantize
+        using in_quant_vec = GenericVector<__nv_fp4x2_storage_t, 4>;
+        in_quant_vec in_vecs[T_PER_G];
+
+        // the compiler cannot prove that the later smem stores don't overlap with these loads,
+        // causing bad codegen. Let's manually move all loads to the top here.
         for (int k = 0; k < T_PER_G; ++k) {
-            const int g_col = (i * T) % cols;
-            const int g_row = (i * T) / cols * G + k * T;
             const int s_col = threadIdx.x % 2;
             const int s_row = threadIdx.x / 2;
             __nv_fp4x2_storage_t* smem_base = a_q_smem + k * T * T / 2;
-            __nv_fp4x2_storage_t* addr = smem_base + swizzle_smem(s_row, s_col) / 2;
-            int scale_idx = g_col / T + (g_row + s_row) * cols / 16;
-            float group_scale = static_cast<float>(x_scales[scale_idx]) * (*x_global_scale);
-            auto quants = GenericVector<__nv_fp4x2_storage_t, 4>::load(addr);
-            GenericVector<nv_bfloat16,8> res;
+            __nv_fp4x2_storage_t* addr = smem_base + 4*s_col + 8*s_row;
+            in_vecs[k] = GenericVector<__nv_fp4x2_storage_t, 4>::load(addr);
+        }
+
+        // dequantize
+        for (int k = 0; k < T_PER_G; ++k) {
+            const int s_col = threadIdx.x % 2;
+            const int s_row = threadIdx.x / 2;
+            float group_scale = static_cast<float>(next_group_scales[k]) * global_scale;
+            auto quants = in_vecs[k];
+            GenericVector<nv_bfloat16, 8> res;
             for (int s = 0; s < 4; ++s) {
                 float2 dq = __nv_cvt_fp4x2_to_float2(quants[s]);
                 res[2*s+0] = dq.x * group_scale;
@@ -85,10 +107,20 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_dequant_tp_quant_kern
         if (const int next = i + W * gridDim.x; next < groups) {
             const int col = (next * T) % cols;
             const int row = (next * T) / cols * G;
-            for (int s = 0; s < T_PER_G; ++s) {
-                __nv_fp4x2_storage_t* smem_base = a_q_smem + s * T * T / 2;
-                const __nv_fp4x2_storage_t* gmem_base = x + col / 2 + (row + s * T) * cols / 2;
-                global_to_shared_swizzle(smem_base, gmem_base, cols);
+            int s_row = threadIdx.x;
+
+            __nv_fp4x2_storage_t* smem_base = a_q_smem + s_row * T / 2;
+            const __nv_fp4x2_storage_t* gmem_base = x + col / 2 + (row + s_row) * cols / 2;
+            for (int s = 0; s < G / WarpSize; ++s) {
+                __pipeline_memcpy_async(
+                            smem_base + s * WarpSize * T / 2,
+                            gmem_base + s * WarpSize * cols / 2,
+                            8);
+            }
+            for (int k = 0; k < T_PER_G; ++k) {
+                const int s_row = threadIdx.x / 2;
+                int scale_idx = cvt_quant_to_fp4_get_sf_out_offset(row + s_row + k * T, col / T, cols / 64);
+                next_group_scales[k] = x_scales[scale_idx];
             }
         }
         __pipeline_commit();
@@ -142,7 +174,7 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_dequant_tp_quant_kern
                 float m3_scale = __uint_as_float((__float_as_uint(scale) & MASK));
                 // TODO Masking == RTZ, is this OK here?
 
-                float factor = m3_scale > 0 ? 1.f / m3_scale : 0.f;
+                float factor = m3_scale > 0 ? reciprocal_approximate_ftz(m3_scale) : 0.f;
 
                 group_n_vec converted;
                 float x_y = 0.f;
@@ -163,7 +195,7 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_dequant_tp_quant_kern
                 x_x += __shfl_xor_sync(0xFFFFFFFFu, x_x, 2);
                 x_y += __shfl_xor_sync(0xFFFFFFFFu, x_y, 2);
 
-                float correction = (x_y == 0) ? 1.f : x_x / x_y;
+                float correction = (x_y == 0) ? 1.f : x_x * reciprocal_approximate_ftz(x_y);
                 float fixed_scale = m3_scale * correction;
                 out_scales[s] = static_cast<nv_bfloat16>(fixed_scale);
 
@@ -206,14 +238,16 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_dequant_tp_quant_kern
     }
 }
 
-void launch_eden_convert_scales_kernel(__nv_fp8_e4m3* scales_fp8, float* global_scale_ptr, const nv_bfloat16* scales_bf16, const unsigned* max_scale_ptr, long seed, int groups, float inv_fp8_max);
-
+void launch_eden_convert_scales_kernel(__nv_fp8_e4m3* scales_fp8, float* global_scale_ptr, const nv_bfloat16* scales_bf16, const unsigned* max_scale_ptr, long seed, float inv_fp8_max, int rows, int cols);
 void dequant_tp_quant_launcher(
     __nv_fp4x2_storage_t* y, __nv_fp8_e4m3* scales_fp8, float* global_scale_ptr,
     nv_bfloat16* scratch_scales, unsigned* max_scale, const nv_bfloat16* h,
     const __nv_fp4x2_storage_t* x, const __nv_fp8_e4m3* x_scales, const float* x_global_scale,
     long seed, float fp4_max, float fp8_max, int M, int N)
 {
+    if (N % 128 != 0) throw std::runtime_error("dequant_tp_quant: N must be divisible by 128");
+    if (M % 128 != 0) throw std::runtime_error("dequant_tp_quant: M must be divisible by 128");
+
     int groups = M * N / 128;
     int blocks, device;
     int smem = NUM_WARPS * 16 * 128 * 2;
@@ -229,7 +263,8 @@ void dequant_tp_quant_launcher(
     cutlass_dequant_tp_quant_kernel<<<sms * blocks, dim3(32, NUM_WARPS), smem>>>(
         y, scratch_scales, max_scale, h, x, x_scales, x_global_scale, M, N, 1.f / fp4_max);
     CUDA_CHECK(cudaGetLastError());
-    launch_eden_convert_scales_kernel(scales_fp8, global_scale_ptr, scratch_scales, max_scale, seed, groups, 1.f / fp8_max);
+    launch_eden_convert_scales_kernel(scales_fp8, global_scale_ptr, scratch_scales, max_scale, seed, 1.f / fp8_max, N, M / 16);
+
 }
 
 void dequant_tp_had_quant(
@@ -240,3 +275,4 @@ void dequant_tp_had_quant(
 {
     dequant_tp_quant_launcher(y, scales_fp8, global_scale_ptr, scratch_scales, max_scale, h, x, x_scales, x_global_scale, seed, fp4_max, fp8_max, M, N);
 }
+

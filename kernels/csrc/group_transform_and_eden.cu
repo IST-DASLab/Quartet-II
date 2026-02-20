@@ -3,6 +3,7 @@
 //
 
 #include <cstdio>
+#include <cuda/cmath>
 #include <cuda_bf16.h>
 #include "utils.cuh"
 #include "vec.cuh"
@@ -33,7 +34,7 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_group_transform_128_e
         // upper-left corner of the tiles
         nv_bfloat16* smem_base = h_smem + i * T * T + j * T * G;
         const nv_bfloat16* gmem_base = h + i * T + j * T * G;
-        global_to_shared_16_32_swizzle(smem_base, gmem_base, G);
+        global_to_shared_swizzle_H(smem_base, gmem_base, G);
     }
     __pipeline_commit();
 
@@ -112,15 +113,14 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_group_transform_128_e
         for (int k = 0; k < 2; ++k) {
             #pragma unroll
             for (int j = 0; j < T_PER_G; ++j) {
-                int s = j + T_PER_G*k;
                 group_f_vec nv_group;
                 nv_group[0] = acc[j].v[0 + 2*k];
                 nv_group[1] = acc[j].v[1 + 2*k];
                 nv_group[2] = acc[j].v[4 + 2*k];
                 nv_group[3] = acc[j].v[5 + 2*k];
-                float abs_max = 0.f;
+                float abs_max = fabsf(nv_group[0]);
                 // determine local abs-max.
-                for (int g = 0; g < group_f_vec::size; ++g) {
+                for (int g = 1; g < group_f_vec::size; ++g) {
                     abs_max = fmaxf(abs_max, fabsf(nv_group[g]));
                 }
                 // now reduce over the quads that collectively hold the 16 elements:
@@ -136,7 +136,7 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_group_transform_128_e
                 float m3_scale = __uint_as_float((__float_as_uint(scale) & MASK));
                 // TODO Masking == RTZ, is this OK here?
 
-                float factor = m3_scale > 0 ? 1.f / m3_scale : 0.f;
+                float factor = m3_scale > 0 ? reciprocal_approximate_ftz(m3_scale) : 0.f;
 
                 group_n_vec converted;
                 float x_y = 0.f;
@@ -157,9 +157,9 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_group_transform_128_e
                 x_x += __shfl_xor_sync(0xFFFFFFFFu, x_x, 2);
                 x_y += __shfl_xor_sync(0xFFFFFFFFu, x_y, 2);
 
-                float correction = (x_y == 0) ? 1.f : x_x / x_y;
+                float correction = (x_y == 0) ? 1.f : x_x * reciprocal_approximate_ftz(x_y);
                 float fixed_scale = m3_scale * correction;
-                out_scales[s] = static_cast<nv_bfloat16>(fixed_scale);
+                out_scales[j + T_PER_G*k] = static_cast<nv_bfloat16>(fixed_scale);
 
                 int t4 = lane_id % 4;
                 int r4 = lane_id / 4;
@@ -167,21 +167,11 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_group_transform_128_e
                     const int col = (i * T) % cols;
                     const int row = (i * T) / cols * G;
 
-                    if (s < 8) {
-                        __nv_fp4x2_storage_t* y_base = y + (col + r4) * rows/2 + row/2;
-                        converted.store(y_base + 2 * t4 + s*8);
-                    } else {
-                        __nv_fp4x2_storage_t* y_base = y + (col + r4 + 8) * rows/2 + row/2;
-                        converted.store(y_base + 2 * t4 + (s-8)*8);
-                    }
+                    __nv_fp4x2_storage_t* y_base = y + (col + r4 + 8*k) * rows/2 + row/2;
+                    converted.store(y_base + 2 * t4 + j*8);
                 } else {
-                    if (s < 8) {
-                        __nv_fp4x2_storage_t* y_base = y + i * T * G / 2 + r4 * G/2;
-                        converted.store(y_base + 2 * t4 + s*8);
-                    } else {
-                        __nv_fp4x2_storage_t* y_base = y + (i * T + 8) * G / 2 + r4 * G/2;
-                         converted.store(y_base + 2 * t4 + (s-8)*8);
-                    }
+                    __nv_fp4x2_storage_t* y_base = y + (i * T + 8 * k) * G / 2 + r4 * G/2;
+                     converted.store(y_base + 2 * t4 + j*8);
                 }
             }
         }
@@ -217,42 +207,65 @@ __global__ __launch_bounds__(NUM_WARPS*32, 1) void cutlass_group_transform_128_e
     }
 }
 
-__global__ void eden_convert_scales_kernel(__nv_fp8_e4m3* scales_fp8, float* global_scale_ptr, const nv_bfloat16* scales_bf16, const unsigned* max_scale_ptr, long seed, int groups, float inv_fp8_max) {
+__global__ void eden_convert_scales_kernel(__nv_fp8_e4m3* scales_fp8, float* global_scale_ptr, const nv_bfloat16* scales_bf16, const unsigned* max_scale_ptr, long seed, float inv_fp8_max, int rows, int cols) {
     using bf16x8 = GenericVector<nv_bfloat16, 8>;
     using fp32x8 = GenericVector<float, 8>;
     using fp8x8 = GenericVector<__nv_fp8_e4m3, 8>;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= groups) return;
+    int col = 8*(threadIdx.x + blockIdx.x * blockDim.x);
+    int row = threadIdx.y + blockIdx.y * 64;
+    if (col >= cols || row >= rows) return;
     uint4 rng = philox<10>(seed, threadIdx.x, blockIdx.x);
     cudaGridDependencySynchronize();
 
     float max_scale = __uint_as_float(*max_scale_ptr);
     float global_scale = max_scale * inv_fp8_max;
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
+    if (threadIdx.x == 0 && blockIdx.x == 0 && threadIdx.y == 0 && blockIdx.y == 0) {
         global_scale_ptr[0] = global_scale;
     }
-    float factor = global_scale != 0 ? 1.f / global_scale : 0.f;
-    bf16x8 src_scales = bf16x8::load(scales_bf16 + i * 8);
+    float factor = global_scale != 0 ? reciprocal_approximate_ftz(global_scale) : 0.f;
+    bf16x8 src_scales[2];
+    src_scales[0] = bf16x8::load(scales_bf16 + col + row * cols);
+    src_scales[1] = bf16x8::load(scales_bf16 + col + (row+32) * cols);
     fp8x8 dst_scales;
-    fp32x8 pre_sr;
-    for (int k = 0; k < 8; ++k) {
-        float src_scale = static_cast<float>(src_scales[k]);
-        pre_sr[k] = src_scale * factor;
+    fp32x8 pre_sr[2];
+    for (int g = 0; g < 2; ++g) {
+        for (int k = 0; k < 8; ++k) {
+            float src_scale = static_cast<float>(src_scales[g][k]);
+            pre_sr[g][k] = src_scale * factor;
+        }
     }
-    dst_scales[0] = stochastic_rounding(pre_sr[0], rng.x);
-    dst_scales[1] = stochastic_rounding(pre_sr[1], rng.y);
-    dst_scales[2] = stochastic_rounding(pre_sr[2], rng.z);
-    dst_scales[3] = stochastic_rounding(pre_sr[3], rng.w);
-    rng = philox<10>(seed + 1, threadIdx.x, blockIdx.x);
-    dst_scales[4] = stochastic_rounding(pre_sr[4], rng.x);
-    dst_scales[5] = stochastic_rounding(pre_sr[5], rng.y);
-    dst_scales[6] = stochastic_rounding(pre_sr[6], rng.z);
-    dst_scales[7] = stochastic_rounding(pre_sr[7], rng.w);
 
-    dst_scales.store(scales_fp8 + i * 8);
+    auto lo = [](unsigned int a) -> unsigned short {
+        return a & 0xffff;
+    };
+    auto hi = [](unsigned int a) -> unsigned short {
+        return (a >> 16) & 0xffff;
+    };
+
+    dst_scales[0] = stochastic_rounding(pre_sr[0][0], lo(rng.x));
+    dst_scales[1] = stochastic_rounding(pre_sr[0][1], lo(rng.y));
+    dst_scales[2] = stochastic_rounding(pre_sr[0][2], lo(rng.z));
+    dst_scales[3] = stochastic_rounding(pre_sr[0][3], lo(rng.w));
+    dst_scales[4] = stochastic_rounding(pre_sr[1][0], hi(rng.x));
+    dst_scales[5] = stochastic_rounding(pre_sr[1][1], hi(rng.y));
+    dst_scales[6] = stochastic_rounding(pre_sr[1][2], hi(rng.z));
+    dst_scales[7] = stochastic_rounding(pre_sr[1][3], hi(rng.w));
+    // with sf swizzling, row+32 corresponds to elements 4-7, so this works out
+    dst_scales.store(scales_fp8 + cvt_quant_to_fp4_get_sf_out_offset(row, col, cols / 4));
+
+    rng = philox<10>(seed + 1, threadIdx.x, blockIdx.x);
+    dst_scales[0] = stochastic_rounding(pre_sr[0][4], lo(rng.x));
+    dst_scales[1] = stochastic_rounding(pre_sr[0][5], lo(rng.y));
+    dst_scales[2] = stochastic_rounding(pre_sr[0][6], lo(rng.z));
+    dst_scales[3] = stochastic_rounding(pre_sr[0][7], lo(rng.w));
+    dst_scales[4] = stochastic_rounding(pre_sr[1][4], hi(rng.x));
+    dst_scales[5] = stochastic_rounding(pre_sr[1][5], hi(rng.y));
+    dst_scales[6] = stochastic_rounding(pre_sr[1][6], hi(rng.z));
+    dst_scales[7] = stochastic_rounding(pre_sr[1][7], hi(rng.w));
+    dst_scales.store(scales_fp8 + cvt_quant_to_fp4_get_sf_out_offset(row, col + 4, cols / 4));
 }
 
-void launch_eden_convert_scales_kernel(__nv_fp8_e4m3* scales_fp8, float* global_scale_ptr, const nv_bfloat16* scales_bf16, const unsigned* max_scale_ptr, long seed, int groups, float inv_fp8_max) {
+void launch_eden_convert_scales_kernel(__nv_fp8_e4m3* scales_fp8, float* global_scale_ptr, const nv_bfloat16* scales_bf16, const unsigned* max_scale_ptr, long seed, float inv_fp8_max, int rows, int cols) {
     cudaLaunchAttribute attribute[1];
     attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attribute[0].val.programmaticStreamSerializationAllowed = 1;
@@ -260,11 +273,11 @@ void launch_eden_convert_scales_kernel(__nv_fp8_e4m3* scales_fp8, float* global_
     cudaLaunchConfig_t config;
     config.attrs = attribute;
     config.numAttrs = 1;
-    config.blockDim = dim3(128);
-    config.gridDim = dim3((groups + 127)/128);
+    config.blockDim = dim3(8, 32, 1);
+    config.gridDim = dim3(cuda::ceil_div(cols, 8*8), rows / 64, 1);
     config.dynamicSmemBytes = 0;
     config.stream = nullptr;
-    CUDA_CHECK(cudaLaunchKernelEx(&config, eden_convert_scales_kernel, scales_fp8, global_scale_ptr, scales_bf16, max_scale_ptr, seed, groups, inv_fp8_max));
+    CUDA_CHECK(cudaLaunchKernelEx(&config, eden_convert_scales_kernel, scales_fp8, global_scale_ptr, scales_bf16, max_scale_ptr, seed, inv_fp8_max, rows, cols));
 }
 
 template<bool TransposeA>
@@ -273,7 +286,9 @@ void group_transform_128_eden_launcher(
     nv_bfloat16* scratch_scales, unsigned* max_scale, const nv_bfloat16* h, const nv_bfloat16* x,
     long seed, float fp4_max, float fp8_max, int M, int N)
 {
-    int groups = M * N / 128;
+    if (N % 128 != 0) throw std::runtime_error("group_transform_128: N must be divisible by 128");
+    if (M % 128 != 0) throw std::runtime_error("group_transform_128: M must be divisible by 128");
+
     int blocks, device;
     int smem = NUM_WARPS * 16 * 128 * 2;
     CUDA_CHECK(cudaGetDevice(&device));
@@ -287,7 +302,7 @@ void group_transform_128_eden_launcher(
 
     cutlass_group_transform_128_eden_kernel<TransposeA><<<sms * blocks, dim3(32, NUM_WARPS), smem>>>(y, scratch_scales, max_scale, h, x, M, N, 1.f / fp4_max);
     CUDA_CHECK(cudaGetLastError());
-    launch_eden_convert_scales_kernel(scales_fp8, global_scale_ptr, scratch_scales, max_scale, seed, groups, 1.f / fp8_max);
+    launch_eden_convert_scales_kernel(scales_fp8, global_scale_ptr, scratch_scales, max_scale, seed, 1.f / fp8_max, TransposeA ? N : M, TransposeA ? M / 16 : N / 16);
 }
 
 void group_transform_128_eden(
