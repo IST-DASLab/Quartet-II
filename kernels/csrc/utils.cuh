@@ -31,22 +31,22 @@ struct m16_n16_k32_c_fragment {
 };
 
 template<typename>
-constexpr char ptx_type_name[] = "unknown_dtype";
+inline constexpr char ptx_type_name[] = "unknown_dtype";
 
 template<>
-constexpr char ptx_type_name<float>[4] = "f32";
+inline constexpr char ptx_type_name<float>[4] = "f32";
 
 template<>
-constexpr char ptx_type_name<half>[4] = "f16";
+inline constexpr char ptx_type_name<half>[4] = "f16";
 
 template<>
-constexpr char ptx_type_name<nv_bfloat16>[5] = "bf16";
+inline constexpr char ptx_type_name<nv_bfloat16>[5] = "bf16";
 
 template<>
-constexpr char ptx_type_name<__nv_fp8_e4m3>[5] = "e4m3";
+inline constexpr char ptx_type_name<__nv_fp8_e4m3>[5] = "e4m3";
 
 template<>
-constexpr char ptx_type_name<__nv_fp8_e5m2>[5] = "e5m2";
+inline constexpr char ptx_type_name<__nv_fp8_e5m2>[5] = "e5m2";
 
 __device__ __forceinline__ m16_n16_a_fragment<nv_bfloat16> load_fragment_a(int lane_id, const nv_bfloat16* base, int ldd) {
     // see https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-fragment-mma-16816-i8-f8
