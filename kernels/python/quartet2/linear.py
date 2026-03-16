@@ -164,8 +164,10 @@ class Quartet_II_fn(torch.autograd.Function):
         if autocast_enabled:
             input = input.to(torch.bfloat16)
             weight = weight.to(torch.bfloat16)
-
-        assert input.dtype == torch.bfloat16
+        elif weight.dtype != torch.bfloat16:
+            raise TypeError("Weight must be bfloat16. Either set `dtype=torch.bfloat16` or enable autocast`")
+        elif input.dtype != torch.bfloat16:
+            raise TypeError("Input must be bfloat16. Either cast input to bfloat16 or enable autocast`")
 
         forward_scale_override = 1.0
 
