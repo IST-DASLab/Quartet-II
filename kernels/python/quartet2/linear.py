@@ -171,6 +171,12 @@ class Quartet_II_fn(torch.autograd.Function):
 
         assert flat_input.dtype == torch.bfloat16
 
+        # Pad rows to multiple of 128
+        num_rows = flat_input.shape[0]
+        pad_rows = (128 - num_rows % 128) % 128
+        if pad_rows > 0:
+            flat_input = torch.nn.functional.pad(flat_input, (0, 0, 0, pad_rows))
+
         forward_scale_override = 1.0
 
         with nvtx_annotate("Abs-max", color="red"):
@@ -189,6 +195,9 @@ class Quartet_II_fn(torch.autograd.Function):
                 input_fp4.fp4, weight_fp4.fp4,
                 input_fp4.micro_scales, weight_fp4.micro_scales,
                 alpha=input_fp4.tensor_scale * weight_fp4.tensor_scale)
+
+        if pad_rows > 0:
+            res = res[:num_rows]
 
         return res.reshape(ctx.orig_shape[:-1] + (ctx.out_dim,),)
 
