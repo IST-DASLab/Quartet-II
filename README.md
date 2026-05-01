@@ -1,6 +1,10 @@
 # Quartet II: Accurate LLM Pre-Training in NVFP4 by Improved Unbiased Gradient Estimation
 
-This is the official code for the Quartet II NVFP4 training paper [![arXiv](https://img.shields.io/badge/arXiv-2601.22813-b31b1b.svg)](https://arxiv.org/abs/2601.22813) 
+This is the official code for the Quartet II NVFP4 training paper [![arXiv](https://img.shields.io/badge/arXiv-2601.22813-b31b1b.svg)](https://arxiv.org/abs/2601.22813)
+
+**[UPDATE 30.05.26]:** Quartet II has been accepted to ICML 2026!
+
+This work was presented at the GPU MODE lecture cycle [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/watch?v=E0G3hf4DneA)
 
 <img width="1286" height="521" alt="image" src="https://github.com/user-attachments/assets/2925e164-9998-4f43-9b6e-b806b8b5964b" />
 
